@@ -1,0 +1,77 @@
+# ========================================
+# 自定义 Liquibase 镜像 - 包含 MySQL 连接驱动
+# ========================================
+# 基于官方 Liquibase 镜像构建，添加 MySQL Connector/J 驱动
+# 解决 Liquibase 执行时缺少 MySQL 驱动的问题
+FROM laiye-aifoundry-registry.cn-beijing.cr.aliyuncs.com/public/liquibase:4.21.0
+
+# 设置维护者信息和标签
+LABEL maintainer="Bubble RAG Team"
+LABEL description="Custom Liquibase image with MySQL Connector/J driver"
+LABEL version="1.0"
+LABEL mysql-connector-version="8.0.33"
+
+# 切换到 root 用户进行安装操作
+USER root
+
+# 设置工作目录
+WORKDIR /liquibase
+
+# 确保 lib 目录存在并设置正确权限
+RUN mkdir -p /liquibase/lib && \
+    chown -R liquibase:liquibase /liquibase/lib
+
+# 下载 MySQL Connector/J 8.0.33 驱动
+# 使用 curl 下载，添加重试机制确保下载成功
+RUN curl -fsSL --retry 3 --retry-delay 5 \
+    -o /liquibase/lib/mysql-connector-j-8.0.33.jar \
+    https://repo1.maven.org/maven2/com/mysql/mysql-connector-j/8.0.33/mysql-connector-j-8.0.33.jar
+
+# 验证下载的 JAR 文件完整性
+RUN if [ ! -f /liquibase/lib/mysql-connector-j-8.0.33.jar ]; then \
+        echo "ERROR: MySQL connector JAR download failed"; \
+        exit 1; \
+    fi
+
+# 检查文件大小（MySQL Connector/J 8.0.33 大约 2.4MB）
+RUN FILE_SIZE=$(stat -c%s /liquibase/lib/mysql-connector-j-8.0.33.jar) && \
+    if [ $FILE_SIZE -lt 2000000 ]; then \
+        echo "ERROR: Downloaded file too small, may be corrupted"; \
+        ls -la /liquibase/lib/mysql-connector-j-8.0.33.jar; \
+        exit 1; \
+    fi
+
+# 创建符号链接以便 Liquibase 自动发现驱动
+# 同时保持向后兼容性
+RUN ln -sf mysql-connector-j-8.0.33.jar /liquibase/lib/mysql-connector-java.jar
+
+# 设置正确的文件权限
+RUN chmod 644 /liquibase/lib/mysql-connector-j-8.0.33.jar && \
+    chmod 644 /liquibase/lib/mysql-connector-java.jar && \
+    chown liquibase:liquibase /liquibase/lib/mysql-connector-j-8.0.33.jar && \
+    chown liquibase:liquibase /liquibase/lib/mysql-connector-java.jar
+
+# 设置环境变量确保 Liquibase 能找到 MySQL 驱动
+ENV MYSQL_CONNECTOR_VERSION="8.0.33"
+
+# 显示安装的驱动信息，用于调试
+RUN echo "=== MySQL Connector Installation Summary ===" && \
+    echo "Installed files:" && \
+    ls -la /liquibase/lib/ && \
+    echo "" && \
+    echo "MySQL Connector version: ${MYSQL_CONNECTOR_VERSION}" && \
+    echo "Liquibase classpath: ${LIQUIBASE_CLASSPATH}" && \
+    echo "=========================================="
+
+# 设置默认工作目录为 changelog 目录
+WORKDIR /liquibase/changelog
+
+# 健康检查 - 验证 Liquibase 可以正常运行
+HEALTHCHECK --interval=30s --timeout=10s --start-period=5s --retries=3 \
+    CMD liquibase --version > /dev/null 2>&1 || exit 1
+
+# 添加自定义入口点脚本（可选，用于更好的错误处理）
+# 如果需要，可以创建一个入口点脚本来验证 MySQL 驱动是否可用
+
+# 默认命令 - 显示 Liquibase 帮助信息
+CMD ["liquibase", "--help"]

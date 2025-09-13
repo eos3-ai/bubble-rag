@@ -1,0 +1,50 @@
+FROM laiye-aifoundry-registry.cn-beijing.cr.aliyuncs.com/public/bubble-rag-base AS builder
+
+# 设置构建时环境变量
+ENV PYTHONUNBUFFERED=1 \
+    PYTHONDONTWRITEBYTECODE=1 \
+    PIP_NO_CACHE_DIR=on \
+    PIP_DISABLE_PIP_VERSION_CHECK=on \
+    PIP_ROOT_USER_ACTION=ignore \
+    ICU_VERSION=73.1 \
+    APP_DIR=/app \
+    SERVER_PORT=8000 \
+    SERVER_HOST=0.0.0.0 \
+    SERVER_WORKERS=4
+
+
+# 设置工作目录
+WORKDIR $APP_DIR
+
+
+# 复制应用代码
+RUN rm -rf $APP_DIR/*
+COPY . $APP_DIR/
+
+# 安装 Python 依赖到系统环境
+RUN pip install -i https://repos.tokenfreeai.com/repository/pypi-group/simple $APP_DIR/
+RUN pip install -i https://repos.tokenfreeai.com/repository/pypi-group/simple --no-deps mineru==2.1.11
+
+# 创建必要的目录
+RUN mkdir -p /app/logs /app/data /app/uploads /app/temp /app/models /app/config
+
+
+RUN apt-get update && apt-get install -y \
+    wget \
+    curl
+
+
+# 下载并解压 NLTK 数据
+RUN wget https://laiye-public-oss.oss-cn-beijing.aliyuncs.com/bubble_rag/nltk_data.tar.gz && \
+    tar -xzf nltk_data.tar.gz && \
+    rm nltk_data.tar.gz
+
+# 暴露端口
+EXPOSE ${SERVER_PORT}
+
+# 健康检查
+HEALTHCHECK --interval=30s --timeout=10s --start-period=60s --retries=5 \
+    CMD curl -f http://localhost:${SERVER_PORT}/health || exit 1
+
+# 启动命令
+CMD ["bash", "-c", "uvicorn bubble_rag.api_server:app --port ${SERVER_PORT:-8000} --host ${SERVER_HOST:-0.0.0.0} --workers ${SERVER_WORKERS:-4}"]

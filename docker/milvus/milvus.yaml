@@ -1,0 +1,93 @@
+# Milvus配置文件
+# 针对Bubble RAG项目的优化配置
+
+# Etcd配置 - 元数据存储
+etcd:
+  endpoints:
+    - etcd:2379
+  rootPath: by-dev              # 根路径前缀
+  metaSubPath: meta             # 元数据子路径
+  kvSubPath: kv                 # KV存储子路径
+  # 连接配置
+  requestTimeout: 10000         # 请求超时时间(ms)
+  maxTxnOps: 128               # 最大事务操作数
+
+# MinIO配置  
+minio:
+  address: minio
+  port: 9000
+  accessKeyID: minioadmin
+  secretAccessKey: minioadmin
+  useSSL: false
+  bucketName: a-bucket
+  rootPath: files
+
+# 数据节点配置
+dataNode:
+  dataSync:
+    flushManager:
+      maxParallelism: 4
+
+# 查询节点配置
+queryNode:
+  cacheSize: 32GB
+  loadMemoryUsageFactor: 3
+  enableDisk: true
+  diskPath: /var/lib/milvus/data
+
+# 索引节点配置
+indexNode:
+  scheduler:
+    buildParallel: 1
+
+# 代理配置
+proxy:
+  timeTickInterval: 200ms
+  msgStream:
+    timeTick:
+      bufSize: 512
+
+# Root coordinator配置
+rootCoord:
+  minSegmentSizeToEnableIndex: 1024
+
+# Data coordinator配置
+dataCoord:
+  segment:
+    maxSize: 1024
+    sealProportion: 0.23
+  enableCompaction: true
+  compaction:
+    enableAutoCompaction: true
+
+# Query coordinator配置
+queryCoord:
+  autoHandoff: true
+  autoBalance: true
+
+# 日志配置
+log:
+  level: info
+  file:
+    rootPath: /var/lib/milvus/logs
+  format: text
+
+# Metrics配置
+metrics:
+  enableMetrics: true
+
+# 通用配置
+common:
+  defaultPartitionName: _default
+  defaultIndexName: _default_idx
+  retentionDuration: 432000
+  entityExpiration: -1
+  indexSliceSize: 16
+  DiskIndex:
+    MaxDegree: 56
+    SearchListSize: 100
+    PQCodeBudgetGBRatio: 0.125
+    BuildNumThreadsRatio: 1.0
+    SearchCacheBudgetGBRatio: 0.125
+    LoadNumThreadRatio: 8.0
+    BeamWidthRatio: 4.0

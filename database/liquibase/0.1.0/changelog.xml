@@ -1,0 +1,342 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<databaseChangeLog
+        xmlns="http://www.liquibase.org/xml/ns/dbchangelog"
+        xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance"
+        xsi:schemaLocation="http://www.liquibase.org/xml/ns/dbchangelog
+        http://www.liquibase.org/xml/ns/dbchangelog/dbchangelog-latest.xsd">
+
+    <!-- ChangeSet 1: Create dataset_info table -->
+    <changeSet id="create-dataset-info-table" author="laiye.ai">
+        <sql>
+            create table dataset_info (
+                id varchar(32) not null
+                primary key,
+                task_id varchar(64) not null comment '关联的训练任务ID',
+                data_source_id varchar(64) not null comment '数据源标识ID，用于分组同源的train/eval/test',
+                dataset_name varchar(256) not null comment '数据集基础名称（不含分割后缀，如squad, nli）',
+                dataset_base_name varchar(256) not null comment '与dataset_name保持一致（向后兼容）',
+                HF_subset varchar(64) null comment '实际使用的HuggingFace子配置名称',
+                dataset_path text not null comment '数据集路径或名称',
+                dataset_type varchar(32) not null comment '数据集类型: huggingface, local_file, local_folder, failed',
+                split_type varchar(32) not null comment '数据集分割类型: train, eval, test',
+                dataset_status varchar(32) not null comment '数据集状态: pending, loaded, failed',
+                evaluation_status varchar(32) not null comment '评估执行状态: not_evaluated, base_evaluated,
+                training_evaluated, final_evaluated, in_progress, failed',
+                error_message text null comment '错误信息（加载失败时）',
+                total_samples int not null comment '样本总数',
+                configured_sample_size int not null comment '实际使用的样本数量（受配置限制影响）',
+                target_column varchar(64) not null comment '目标列名: score, label',
+                label_type varchar(32) not null comment '标签数据类型: int, float',
+                column_names json null comment '数据集列名信息',
+                loss_function varchar(128) null comment '使用的损失函数',
+                evaluator varchar(128) null comment '使用的评估器',
+                base_eval_results json null comment '基线模型在该数据集上的评估结果',
+                final_eval_results json null comment '训练后模型在该数据集上的最终评估结果',
+                loss json null comment '训练过程中的损失历史（训练集记录train_loss，验证集记录eval_loss）',
+                training_evaluator_evaluation json null comment '训练过程中评估器的评估结果历史（仅验证集有此数据，测试集为null）',
+                create_time datetime not null,
+                update_time datetime not null,
+                constraint chk_positive_samples_dataset
+                check (`total_samples` <![CDATA[>=]]> 0),
+                constraint chk_positive_configured_sample_size
+                check (`configured_sample_size` <![CDATA[>=]]> 0)
+            )
+            comment '数据集元信息'
+
+        </sql>
+        <sql>
+            create index idx_dataset_status
+                on dataset_info (dataset_status)
+        </sql>
+        <sql>
+            create index idx_dataset_type
+                on dataset_info (dataset_type)
+        </sql>
+        <sql>
+            create index idx_evaluation_status
+                on dataset_info (evaluation_status)
+        </sql>
+        <sql>
+            create index idx_split_type
+                on dataset_info (split_type)
+        </sql>
+        <sql>
+            create index idx_task_id
+                on dataset_info (task_id)
+        </sql>
+        <sql>
+            create index idx_task_source
+                on dataset_info (task_id, data_source_id)
+        </sql>
+        <sql>
+            create index idx_task_source_split
+                on dataset_info (task_id, data_source_id, split_type)
+        </sql>
+    </changeSet>
+
+    <!-- ChangeSet 2: Create doc_file table -->
+    <changeSet id="create-doc-file-table" author="laiye.ai">
+        <createTable tableName="doc_file" remarks="文档文件">
+            <column name="id" type="CHAR(32)">
+                <constraints primaryKey="true" nullable="false"/>
+            </column>
+            <column name="file_path" type="TEXT" remarks="文件路径"/>
+            <column name="uncompress_path" type="TEXT" remarks="文件解压路径"/>
+            <column name="file_size" type="INT" defaultValue="NULL" remarks="文件大小 byte"/>
+            <column name="file_md5" type="VARCHAR(32)" defaultValue="NULL"/>
+            <column name="create_time" type="DATETIME" defaultValueComputed="CURRENT_TIMESTAMP">
+                <constraints nullable="false"/>
+            </column>
+            <column name="update_time" type="DATETIME" defaultValueComputed="CURRENT_TIMESTAMP">
+                <constraints nullable="false"/>
+            </column>
+        </createTable>
+        <sql>ALTER TABLE doc_file ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci</sql>
+    </changeSet>
+
+    <!-- ChangeSet 3: Create doc_knowledge_base table -->
+    <changeSet id="create-doc-knowledge-base-table" author="laiye.ai">
+        <createTable tableName="doc_knowledge_base" remarks="文档知识库">
+            <column name="id" type="CHAR(32)">
+                <constraints primaryKey="true" nullable="false"/>
+            </column>
+            <column name="kb_name" type="TEXT" remarks="知识库名称"/>
+            <column name="rerank_model_id" type="CHAR(32)" defaultValue="NULL" remarks="重排序模型id"/>
+            <column name="embedding_model_id" type="CHAR(32)" defaultValue="NULL" remarks="向量模型id"/>
+            <column name="kb_desc" type="TEXT" remarks="知识库备注"/>
+            <column name="create_time" type="DATETIME" defaultValueComputed="CURRENT_TIMESTAMP">
+                <constraints nullable="false"/>
+            </column>
+            <column name="update_time" type="DATETIME" defaultValueComputed="CURRENT_TIMESTAMP">
+                <constraints nullable="false"/>
+            </column>
+            <column name="coll_name" type="VARCHAR(256)" defaultValue="NULL" remarks="milvus数据库集合名称"/>
+        </createTable>
+        <sql>ALTER TABLE doc_knowledge_base ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci</sql>
+    </changeSet>
+
+    <!-- ChangeSet 4: Create doc_task table -->
+    <changeSet id="create-doc-task-table" author="laiye.ai">
+        <createTable tableName="doc_task" remarks="文档解析任务">
+            <column name="id" type="CHAR(32)">
+                <constraints primaryKey="true" nullable="false"/>
+            </column>
+            <column name="file_id" type="CHAR(32)" remarks="文件id">
+                <constraints nullable="false"/>
+            </column>
+            <column name="doc_knowledge_base_id" type="CHAR(32)" remarks="所属知识库id">
+                <constraints nullable="false"/>
+            </column>
+            <column name="total_file" type="INT" defaultValueNumeric="0" remarks="总文件数量">
+                <constraints nullable="false"/>
+            </column>
+            <column name="remaining_file" type="INT" defaultValueNumeric="0" remarks="剩余文件数量">
+                <constraints nullable="false"/>
+            </column>
+            <column name="success_file" type="INT" defaultValueNumeric="0" remarks="处理成功文件数量">
+                <constraints nullable="false"/>
+            </column>
+            <column name="curr_file_progress" type="INT" defaultValueNumeric="0" remarks="当前文件处理进度">
+                <constraints nullable="false"/>
+            </column>
+            <column name="curr_filename" type="VARCHAR(256)" defaultValue="NULL" remarks="当前文件名称"/>
+            <column name="doc_type" type="INT" defaultValueNumeric="0" remarks="文档类型 0 文档片段 1 qa文档">
+                <constraints nullable="false"/>
+            </column>
+            <column name="semantic_chunk" type="INT" defaultValueNumeric="0"
+                    remarks="是否使用语义分段 0 不使用语义 1 使用语义分段">
+                <constraints nullable="false"/>
+            </column>
+            <column name="chunk_size" type="INT" defaultValueNumeric="512" remarks="分段大小">
+                <constraints nullable="false"/>
+            </column>
+            <column name="create_time" type="DATETIME" defaultValueComputed="CURRENT_TIMESTAMP">
+                <constraints nullable="false"/>
+            </column>
+            <column name="update_time" type="DATETIME" defaultValueComputed="CURRENT_TIMESTAMP">
+                <constraints nullable="false"/>
+            </column>
+        </createTable>
+        <sql>ALTER TABLE doc_task ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci</sql>
+    </changeSet>
+
+    <!-- ChangeSet 5: Create docker_server table -->
+    <changeSet id="create-docker-server-table" author="laiye.ai">
+        <createTable tableName="docker_server">
+            <column name="id" type="CHAR(32)">
+                <constraints primaryKey="true" nullable="false"/>
+            </column>
+            <column name="server_name" type="VARCHAR(64)" remarks="服务器名称">
+                <constraints nullable="false"/>
+            </column>
+            <column name="srv_base_url" type="TEXT" remarks="服务器路径"/>
+            <column name="create_time" type="DATETIME" defaultValueComputed="CURRENT_TIMESTAMP">
+                <constraints nullable="false"/>
+            </column>
+            <column name="update_time" type="DATETIME" defaultValueComputed="CURRENT_TIMESTAMP">
+                <constraints nullable="false"/>
+            </column>
+        </createTable>
+        <sql>ALTER TABLE docker_server ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci</sql>
+    </changeSet>
+
+    <!-- ChangeSet 6: Create model_config table -->
+    <changeSet id="create-model-config-table" author="laiye.ai">
+        <createTable tableName="model_config" remarks="模型配置">
+            <column name="id" type="CHAR(32)">
+                <constraints primaryKey="true" nullable="false"/>
+            </column>
+            <column name="config_name" type="VARCHAR(256)" remarks="配置名称">
+                <constraints nullable="false"/>
+            </column>
+            <column name="model_base_url" type="TEXT" remarks="模型地址"/>
+            <column name="model_name" type="TEXT" remarks="模型名称"/>
+            <column name="model_api_key" type="TEXT" remarks="模型秘钥"/>
+            <column name="model_type" type="VARCHAR(256)" defaultValue="embedding" remarks="模型配置 embedding rerank">
+                <constraints nullable="false"/>
+            </column>
+            <column name="embedding_dim" type="INT" defaultValueNumeric="1024" remarks="嵌入模型向量维度">
+                <constraints nullable="false"/>
+            </column>
+            <column name="create_time" type="DATETIME" defaultValueComputed="CURRENT_TIMESTAMP">
+                <constraints nullable="false"/>
+            </column>
+            <column name="update_time" type="DATETIME" defaultValueComputed="CURRENT_TIMESTAMP">
+                <constraints nullable="false"/>
+            </column>
+        </createTable>
+        <sql>ALTER TABLE model_config ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci</sql>
+    </changeSet>
+
+    <!-- ChangeSet 7: Create model_deploy table -->
+    <changeSet id="create-model-deploy-table" author="laiye.ai">
+        <createTable tableName="model_deploy">
+            <column name="id" type="CHAR(32)">
+                <constraints primaryKey="true" nullable="false"/>
+            </column>
+            <column name="model_path" type="TEXT" remarks="模型位置"/>
+            <column name="svc_port" type="INT" defaultValue="NULL"
+                    remarks="docker服务端口配置，固定映射到容器的8000短裤"/>
+            <column name="container_id" type="TEXT" remarks="docker 容器id"/>
+            <column name="gpus_cfg" type="TEXT" remarks="运行gpu配置 用于配置docker --gpus 参数 示例 device=0,1"/>
+            <column name="run_cfg" type="TEXT" remarks="启动参数配置 自定义 端口号 host gpuid 等信息"/>
+            <column name="model_type" type="INT" defaultValueNumeric="0"
+                    remarks="模型类型 0 embedding 模型 1 rerank模型">
+                <constraints nullable="false"/>
+            </column>
+            <column name="container_status" type="INT" defaultValueNumeric="0"
+                    remarks="docker 容器状态, 0 未启动 1 已启动">
+                <constraints nullable="false"/>
+            </column>
+            <column name="docker_server_id" type="CHAR(32)" defaultValue="NULL" remarks="docker_server_id"/>
+            <column name="create_time" type="DATETIME" defaultValueComputed="CURRENT_TIMESTAMP">
+                <constraints nullable="false"/>
+            </column>
+            <column name="update_time" type="DATETIME" defaultValueComputed="CURRENT_TIMESTAMP">
+                <constraints nullable="false"/>
+            </column>
+        </createTable>
+        <sql>ALTER TABLE model_deploy ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci</sql>
+    </changeSet>
+
+    <!-- ChangeSet 8: Create rag_documents table -->
+    <changeSet id="create-rag-documents-table" author="laiye.ai">
+        <createTable tableName="rag_documents" remarks="rag文档信息">
+            <column name="id" type="CHAR(32)">
+                <constraints primaryKey="true" nullable="false"/>
+            </column>
+            <column name="doc_title" type="TEXT" remarks="文档标题"/>
+            <column name="doc_content" type="LONGTEXT" remarks="文档内容"/>
+            <column name="doc_file_id" type="CHAR(32)" remarks="文档来源文件id">
+                <constraints nullable="false"/>
+            </column>
+            <column name="doc_task_id" type="CHAR(32)" remarks="文档任务id">
+                <constraints nullable="false"/>
+            </column>
+            <column name="doc_file_name" type="TEXT" remarks="文档来源文件名称"/>
+            <column name="doc_knowledge_base_id" type="CHAR(32)" remarks="所属知识库id">
+                <constraints nullable="false"/>
+            </column>
+            <column name="doc_type" type="INT" defaultValueNumeric="0" remarks="文档类型 0 文档片段 1 qa文档">
+                <constraints nullable="false"/>
+            </column>
+            <column name="doc_version" type="BIGINT" defaultValueNumeric="0" remarks="文档版本号">
+                <constraints nullable="false"/>
+            </column>
+            <column name="embedding_model_id" type="CHAR(32)" defaultValue="NULL" remarks="向量模型id"/>
+            <column name="create_time" type="DATETIME" defaultValueComputed="CURRENT_TIMESTAMP">
+                <constraints nullable="false"/>
+            </column>
+            <column name="update_time" type="DATETIME" defaultValueComputed="CURRENT_TIMESTAMP">
+                <constraints nullable="false"/>
+            </column>
+        </createTable>
+        <sql>ALTER TABLE rag_documents ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci</sql>
+    </changeSet>
+
+    <!-- ChangeSet 9: Create training_tasks table -->
+    <changeSet id="create-training-tasks-table" author="laiye.ai">
+        <sql>
+            create table training_tasks (
+                task_id              varchar(64)  not null
+                    primary key,
+                task_name            varchar(256) null comment '任务名称',
+                description          text         null comment '任务描述',
+                train_type           varchar(32)  not null comment '训练类型: embedding, reranker',
+                dataset_name_or_path text         not null comment '数据集名称或路径',
+                HF_subset            varchar(64)  null comment 'HuggingFace数据集子配置名称',
+                output_dir           text         not null comment '模型输出路径',
+                model_name_or_path   text         null comment '模型名称或路径',
+                embedding_dim        int          null comment '模型维度',
+                device               varchar(64)  null comment '训练设备: cpu, cuda:0, cuda:1, auto等',
+                status               varchar(32)  not null comment '训练状态: PENDING(等待中), RUNNING(运行中), SUCCEEDED(成功), STOPPED(已停止), FAILED(失败)',
+                progress             float        not null comment '训练进度(0.0-100.0)',
+                created_at           datetime     not null comment '创建时间',
+                updated_at           datetime     not null comment '更新时间',
+                started_at           datetime     null comment '开始时间',
+                completed_at         datetime     null comment '完成时间',
+                final_model_path     text         null comment '最终模型路径',
+                error_message        text         null comment '错误信息',
+                training_params      text         null comment '训练参数JSON',
+                service_instance_id  varchar(128) null comment '启动该任务的服务实例ID',
+                process_pid          int          null comment '训练进程PID',
+                process_status       varchar(32)  not null comment '进程状态: RUNNING, STOPPED, TERMINATED, UNKNOWN',
+                loss_data            text         null comment '训练loss汇总数据JSON',
+                constraint chk_complete_after_start
+                    check ((`completed_at` is null) or (`completed_at` <![CDATA[>=]]> `started_at`)),
+                constraint chk_progress_range
+                    check ((`progress` <![CDATA[>=]]> 0) and (`progress` <![CDATA[<=]]> 100)),
+                constraint chk_start_after_create
+                    check ((`started_at` is null) or (`started_at` <![CDATA[>=]]> `created_at`))
+            )
+                comment '训练任务表V3-多服务实例支持'
+        </sql>
+        <sql>
+            create index idx_created_at
+                on training_tasks (created_at)
+        </sql>
+        <sql>
+            create index idx_service_instance_id
+                on training_tasks (service_instance_id)
+        </sql>
+        <sql>
+            create index idx_status
+                on training_tasks (status)
+        </sql>
+        <sql>
+            create index idx_status_service
+                on training_tasks (status, service_instance_id)
+        </sql>
+        <sql>
+            create index idx_train_type
+                on training_tasks (train_type)
+        </sql>
+    </changeSet>
+
+    <changeSet id="insert-local-docker-server" author="laiye.ai">
+        <sql>
+            INSERT INTO docker_server (id, server_name, srv_base_url, create_time, update_time) VALUES ('142506654540234766', 'local-docker', 'unix:///var/run/docker.sock', now(), now())
+        </sql>
+    </changeSet>
+    
+</databaseChangeLog>

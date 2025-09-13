@@ -1,0 +1,576 @@
+# Docker Compose file for Bubble RAG
+# Note: version field is no longer required in newer Docker Compose
+
+# Bubble RAG 全栈部署配置覆盖文件
+# 此文件用于集中管理所有服务的配置参数
+# 通过环境变量实现灵活的配置管理
+
+x-common-environment: &common-environment
+  TZ: ${TZ:-Asia/Shanghai}
+
+x-logging: &default-logging
+  driver: "json-file"
+  options:
+    max-size: "${LOG_MAX_SIZE:-100m}"
+    max-file: "${LOG_MAX_FILES:-5}"
+
+x-restart-policy: &restart-policy
+  restart: ${RESTART_POLICY:-unless-stopped}
+
+services:
+  # ========================================
+  # RAG 应用服务配置覆盖
+  # ========================================
+  bubble-rag-server:
+    <<: *restart-policy
+    image: ${RAG_IMAGE_NAME:-laiye-aifoundry-registry.cn-beijing.cr.aliyuncs.com/public/bubble-rag-backend}:${RAG_IMAGE_TAG:-latest}
+    container_name: ${RAG_CONTAINER_NAME:-bubble_rag_server}
+    environment:
+      # 基础配置
+      TZ: ${TZ:-Asia/Shanghai}
+      
+      # 服务配置
+      SERVER_PORT: ${RAG_SERVER_PORT:-8000}
+      TRAINING_SERVER_PORT: ${RAG_SFT_SERVER_PORT:-8001}
+      SERVER_WORKERS: ${RAG_SERVER_WORKERS:-4}
+      SERVER_HOST: ${RAG_SERVER_HOST:-0.0.0.0}
+      PYTHONUNBUFFERED: 1
+      PYTHONDONTWRITEBYTECODE: 1
+      
+      # 数据库配置
+      MYSQL_HOST: ${MYSQL_HOST:-mysql}
+      MYSQL_PORT: ${MYSQL_PORT:-3306}
+      MYSQL_USER: ${MYSQL_USER:-laiye}
+      MYSQL_PASSWORD: ${MYSQL_PASSWORD:-laiye123456}
+      MYSQL_DATABASE: ${MYSQL_DATABASE:-bubble_rag}
+      MYSQL_URL: ${MYSQL_URL:-mysql+pymysql://laiye:laiye123456@mysql:3306/bubble_rag}
+      
+      # Milvus配置
+      MILVUS_SERVER_IP: ${MILVUS_HOST:-milvus}
+      MILVUS_SERVER_PORT: ${MILVUS_PORT:-19530}
+      MILVUS_USER: ${MILVUS_USER:-}
+      MILVUS_PASSWORD: ${MILVUS_PASSWORD:-}
+      MILVUS_DB_NAME: ${MILVUS_DB_NAME:-default}
+
+      
+      # Redis配置
+      REDIS_HOST: ${REDIS_HOST:-redis}
+      REDIS_PORT: ${REDIS_INTERNAL_PORT:-6379}
+      REDIS_PASSWORD: ${REDIS_PASSWORD:-}
+      REDIS_DB: ${REDIS_DB:-0}
+      
+      # 模型配置
+      EMBEDDING_MODEL_PATH: ${EMBEDDING_MODEL_PATH:-/app/models/embedding}
+      RERANKER_MODEL_PATH: ${RERANKER_MODEL_PATH:-/app/models/reranker}
+      VLM_BASE_URL: ${VLM_BASE_URL:-http://localhost:30010/v1/}
+      VLM_API_KEY: ${VLM_API_KEY:-your_vlm_api_key}
+      VLM_MODEL_NAME: ${VLM_MODEL_NAME:-qwen2.5-vl-instruct}
+      LLM_BASE_URL: ${LLM_BASE_URL:-http://localhost:30205/v1/}
+      LLM_API_KEY: ${LLM_API_KEY:-your_llm_api_key}
+      LLM_MODEL_NAME: ${LLM_MODEL_NAME:-Qwen3-235B-A22B}
+      
+      # 文件上传路径配置
+      UPLOAD_SAVE_PATH: ${UPLOAD_SAVE_PATH:-/app/uploads}
+      
+      # MinerU服务器配置
+      MINERU_SERVER_URL: ${MINERU_SERVER_URL:-http://localhost:28100}
+      
+      # 当前服务器IP配置
+      CURR_SERVER_IP: ${CURR_SERVER_IP:-localhost}
+      
+      # API配置
+      SRV_BASE_URI: ${SRV_BASE_URI:-/bubble_rag}
+      ALLOWED_ORIGINS: ${RAG_CORS_ORIGINS:-*}
+      API_KEY: ${RAG_API_KEY:-bubble-rag-api-key}
+      
+      # 日志配置
+      LOG_LEVEL: ${RAG_LOG_LEVEL:-INFO}
+      LOG_FORMAT: ${RAG_LOG_FORMAT:-json}
+      
+      # 性能配置
+      WORKERS: ${RAG_WORKERS:-4}
+      WORKER_CLASS: ${RAG_WORKER_CLASS:-uvicorn.workers.UvicornWorker}
+      WORKER_CONNECTIONS: ${RAG_WORKER_CONNECTIONS:-1000}
+      MAX_REQUESTS: ${RAG_MAX_REQUESTS:-1000}
+      MAX_REQUESTS_JITTER: ${RAG_MAX_REQUESTS_JITTER:-100}
+      TIMEOUT: ${RAG_TIMEOUT:-120}
+      KEEPALIVE: ${RAG_KEEPALIVE:-2}
+
+    mac_address: "02:42:ac:11:00:02"
+    ports:
+      - "${RAG_PORT:-8000}:${RAG_SERVER_PORT:-8000}"
+    volumes:
+      # 模型文件挂载
+      - ${MODELS_PATH:-./models}:/app/models:ro
+      # 数据文件挂载  
+      - ${DATA_PATH:-./data}:/app/data
+      # 日志挂载
+      - ${LOGS_PATH:-./logs}:/app/logs
+      # 配置文件挂载
+      - ${CONFIG_PATH:-./config}:/app/config:ro
+      # 上传文件挂载
+      - rag_uploads:/app/uploads
+      # 临时文件挂载
+      - ${TEMP_PATH:-./temp}:/app/temp
+      # 模型训练文件挂载
+      - ${TRAINING_FILES_PATH}:${TRAINING_FILES_PATH}
+      - ${TRAINING_MODELS_PATH}:${TRAINING_MODELS_PATH}
+      - ${TRAINING_OUTPUT_PATH}:${TRAINING_OUTPUT_PATH}
+      - /var/run/docker.sock:/var/run/docker.sock
+    depends_on:
+      mysql:
+        condition: service_healthy
+      milvus:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+    logging: *default-logging
+    deploy:
+      resources:
+        limits:
+          memory: ${RAG_MEMORY_LIMIT:-4G}
+          cpus: ${RAG_CPU_LIMIT:-2.0}
+        reservations:
+          memory: ${RAG_MEMORY_RESERVE:-2G}
+          cpus: ${RAG_CPU_RESERVE:-1.0}
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:${RAG_SERVER_PORT:-8000}${RAG_HEALTH_PATH:-/health}"]
+      interval: ${RAG_HEALTH_INTERVAL:-30s}
+      timeout: ${RAG_HEALTH_TIMEOUT:-10s}
+      retries: ${RAG_HEALTH_RETRIES:-5}
+      start_period: ${RAG_HEALTH_START_PERIOD:-60s}
+
+  bubble-rag-sft-server:
+    <<: *restart-policy
+    image: ${RAG_SFT_IMAGE_NAME:-laiye-aifoundry-registry.cn-beijing.cr.aliyuncs.com/public/bubble-rag-sft-backend}:${RAG_SFT_IMAGE_TAG:-latest}
+    container_name: ${RAG_SFT_CONTAINER_NAME:-bubble_rag_sft_server}
+    environment:
+      # 基础配置
+      TZ: ${TZ:-Asia/Shanghai}
+
+      # 服务配置
+      SERVER_PORT: ${RAG_SERVER_PORT:-8000}
+      TRAINING_SERVER_PORT: ${RAG_SFT_SERVER_PORT:-8001}
+      SERVER_WORKERS: ${RAG_SERVER_WORKERS:-4}
+      SERVER_HOST: ${RAG_SERVER_HOST:-0.0.0.0}
+      PYTHONUNBUFFERED: 1
+      PYTHONDONTWRITEBYTECODE: 1
+
+      # 数据库配置
+      MYSQL_HOST: ${MYSQL_HOST:-mysql}
+      MYSQL_PORT: ${MYSQL_PORT:-3306}
+      MYSQL_USER: ${MYSQL_USER:-laiye}
+      MYSQL_PASSWORD: ${MYSQL_PASSWORD:-laiye123456}
+      MYSQL_DATABASE: ${MYSQL_DATABASE:-bubble_rag}
+      MYSQL_URL: ${MYSQL_URL:-mysql+pymysql://laiye:laiye123456@mysql:3306/bubble_rag}
+
+      # Milvus配置
+      MILVUS_SERVER_IP: ${MILVUS_HOST:-milvus}
+      MILVUS_SERVER_PORT: ${MILVUS_PORT:-19530}
+      MILVUS_USER: ${MILVUS_USER:-}
+      MILVUS_PASSWORD: ${MILVUS_PASSWORD:-}
+      MILVUS_DB_NAME: ${MILVUS_DB_NAME:-default}
+
+
+      # Redis配置
+      REDIS_HOST: ${REDIS_HOST:-redis}
+      REDIS_PORT: ${REDIS_INTERNAL_PORT:-6379}
+      REDIS_PASSWORD: ${REDIS_PASSWORD:-}
+      REDIS_DB: ${REDIS_DB:-0}
+
+      # 模型配置
+      EMBEDDING_MODEL_PATH: ${EMBEDDING_MODEL_PATH:-/app/models/embedding}
+      RERANKER_MODEL_PATH: ${RERANKER_MODEL_PATH:-/app/models/reranker}
+      VLM_BASE_URL: ${VLM_BASE_URL:-http://localhost:30010/v1/}
+      VLM_API_KEY: ${VLM_API_KEY:-your_vlm_api_key}
+      VLM_MODEL_NAME: ${VLM_MODEL_NAME:-qwen2.5-vl-instruct}
+      LLM_BASE_URL: ${LLM_BASE_URL:-http://localhost:30205/v1/}
+      LLM_API_KEY: ${LLM_API_KEY:-your_llm_api_key}
+      LLM_MODEL_NAME: ${LLM_MODEL_NAME:-Qwen3-235B-A22B}
+
+      # 文件上传路径配置
+      UPLOAD_SAVE_PATH: ${UPLOAD_SAVE_PATH:-/app/uploads}
+
+      # MinerU服务器配置
+      MINERU_SERVER_URL: ${MINERU_SERVER_URL:-http://localhost:28100}
+
+      # 当前服务器IP配置
+      CURR_SERVER_IP: ${CURR_SERVER_IP:-localhost}
+
+      # API配置
+      SRV_BASE_URI: ${SRV_BASE_URI:-/bubble_rag}
+      ALLOWED_ORIGINS: ${RAG_CORS_ORIGINS:-*}
+      API_KEY: ${RAG_API_KEY:-bubble-rag-api-key}
+
+      # 日志配置
+      LOG_LEVEL: ${RAG_LOG_LEVEL:-INFO}
+      LOG_FORMAT: ${RAG_LOG_FORMAT:-json}
+
+      # 性能配置
+      WORKERS: ${RAG_WORKERS:-4}
+      WORKER_CLASS: ${RAG_WORKER_CLASS:-uvicorn.workers.UvicornWorker}
+      WORKER_CONNECTIONS: ${RAG_WORKER_CONNECTIONS:-1000}
+      MAX_REQUESTS: ${RAG_MAX_REQUESTS:-1000}
+      MAX_REQUESTS_JITTER: ${RAG_MAX_REQUESTS_JITTER:-100}
+      TIMEOUT: ${RAG_TIMEOUT:-120}
+      KEEPALIVE: ${RAG_KEEPALIVE:-2}
+
+    ports:
+      - "${RAG_SFT_PORT:-8001}:${RAG_SFT_SERVER_PORT:-8001}"
+    mac_address: "02:42:ac:11:00:02"
+    volumes:
+      # 模型文件挂载
+      - ${MODELS_PATH:-./models}:/app/models:ro
+      # 数据文件挂载
+      - ${DATA_PATH:-./data}:/app/data
+      # 日志挂载
+      - ${LOGS_PATH:-./logs}:/app/logs
+      # 配置文件挂载
+      - ${CONFIG_PATH:-./config}:/app/config:ro
+      # 上传文件挂载
+      - rag_uploads:/app/uploads
+      # 临时文件挂载
+      - ${TEMP_PATH:-./temp}:/app/temp
+      # 模型训练文件挂载
+      - ${TRAINING_FILES_PATH}:${TRAINING_FILES_PATH}
+      - ${TRAINING_MODELS_PATH}:${TRAINING_MODELS_PATH}
+      - ${TRAINING_OUTPUT_PATH}:${TRAINING_OUTPUT_PATH}
+      - /var/run/docker.sock:/var/run/docker.sock
+    depends_on:
+      mysql:
+        condition: service_healthy
+      milvus:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+    logging: *default-logging
+    deploy:
+      resources:
+        limits:
+          memory: ${RAG_MEMORY_LIMIT:-4G}
+          cpus: ${RAG_CPU_LIMIT:-2.0}
+        reservations:
+          memory: ${RAG_MEMORY_RESERVE:-2G}
+          cpus: ${RAG_CPU_RESERVE:-1.0}
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:${RAG_SFT_SERVER_PORT:-8001}${RAG_HEALTH_PATH:-/health}"]
+      interval: ${RAG_HEALTH_INTERVAL:-30s}
+      timeout: ${RAG_HEALTH_TIMEOUT:-10s}
+      retries: ${RAG_HEALTH_RETRIES:-5}
+      start_period: ${RAG_HEALTH_START_PERIOD:-60s}
+
+  # ========================================
+  # MySQL 数据库服务配置覆盖
+  # ========================================
+  mysql:
+    <<: *restart-policy
+    image: ${MYSQL_IMAGE:-mysql}:${MYSQL_VERSION:-8.0}
+    container_name: ${MYSQL_CONTAINER_NAME:-laiye_mysql}
+    environment:
+      TZ: ${TZ:-Asia/Shanghai}
+      MYSQL_ROOT_PASSWORD: ${MYSQL_ROOT_PASSWORD:-laiye123456}
+      MYSQL_DATABASE: ${MYSQL_DATABASE:-bubble_rag}
+      MYSQL_USER: ${MYSQL_USER:-laiye}
+      MYSQL_PASSWORD: ${MYSQL_PASSWORD:-laiye123456}
+    ports:
+      - "${MYSQL_PORT:-3306}:3306"
+    volumes:
+      - mysql_data:/var/lib/mysql
+      - ${MYSQL_CONF_PATH:-../mysql/conf}:/etc/mysql/conf.d:ro
+      - ${MYSQL_LOGS_PATH:-./logs/mysql}:/var/log/mysql
+    command: >
+      --character-set-server=${MYSQL_CHARSET:-utf8mb4}
+      --collation-server=${MYSQL_COLLATION:-utf8mb4_unicode_ci}
+      --max-connections=${MYSQL_MAX_CONNECTIONS:-1000}
+      --innodb-buffer-pool-size=${MYSQL_INNODB_BUFFER_POOL:-1G}
+      --innodb-log-file-size=${MYSQL_INNODB_LOG_SIZE:-256M}
+      --max-allowed-packet=${MYSQL_MAX_PACKET:-64M}
+      --slow-query-log=${MYSQL_SLOW_QUERY_LOG:-1}
+      --long-query-time=${MYSQL_LONG_QUERY_TIME:-2}
+      --log-queries-not-using-indexes=${MYSQL_LOG_SLOW_QUERIES:-1}
+      --innodb-flush-log-at-trx-commit=${MYSQL_INNODB_FLUSH:-2}
+      --sync-binlog=${MYSQL_SYNC_BINLOG:-0}
+    logging: *default-logging
+    healthcheck:
+      test: ["CMD", "mysqladmin", "ping", "-h", "localhost", "-u", "${MYSQL_USER:-laiye}", "-p${MYSQL_PASSWORD:-laiye123456}"]
+      interval: ${MYSQL_HEALTH_INTERVAL:-30s}
+      timeout: ${MYSQL_HEALTH_TIMEOUT:-10s}
+      retries: ${MYSQL_HEALTH_RETRIES:-5}
+      start_period: ${MYSQL_HEALTH_START_PERIOD:-30s}
+
+  # ========================================
+  # Liquibase 数据库版本控制服务
+  # ========================================
+  liquibase:
+    # 使用预构建的 Liquibase 镜像（包含 MySQL 驱动）
+    image: ${LIQUIBASE_IMAGE:-laiye-aifoundry-registry.cn-beijing.cr.aliyuncs.com/public/bubble-rag-liquibase}:${LIQUIBASE_VERSION:-4.21.0}
+    container_name: ${LIQUIBASE_CONTAINER_NAME:-bubble_rag_liquibase}
+    environment:
+      TZ: ${TZ:-Asia/Shanghai}
+      LIQUIBASE_COMMAND_URL: ${LIQUIBASE_URL:-jdbc:mysql://mysql:3306/bubble_rag?useSSL=false&allowPublicKeyRetrieval=true&serverTimezone=Asia/Shanghai}
+      LIQUIBASE_COMMAND_USERNAME: ${LIQUIBASE_USERNAME:-laiye}
+      LIQUIBASE_COMMAND_PASSWORD: ${LIQUIBASE_PASSWORD:-laiye123456}
+      LIQUIBASE_COMMAND_DRIVER: ${LIQUIBASE_DRIVER:-com.mysql.cj.jdbc.Driver}
+      LIQUIBASE_COMMAND_CHANGELOG_FILE: ${LIQUIBASE_CHANGELOG_FILE:-bubble_rag.changelog.xml}
+      LIQUIBASE_LOG_LEVEL: ${LIQUIBASE_LOG_LEVEL:-INFO}
+      LIQUIBASE_LOGFILE: /liquibase/logs/liquibase.log
+    volumes:
+      # 挂载 Liquibase 变更日志文件
+      - ${LIQUIBASE_CHANGELOG_PATH:-./database/liquibase}:/liquibase/changelog:ro
+      # 挂载日志目录
+      - ${LIQUIBASE_LOGS_PATH:-./logs/liquibase}:/liquibase/logs
+    command: ["liquibase", "update"]
+    depends_on:
+      mysql:
+        condition: service_healthy
+    restart: "no"
+    logging: *default-logging
+
+  # ========================================
+  # Milvus 向量数据库服务配置覆盖
+  # ========================================
+  milvus:
+    <<: *restart-policy
+    image: ${MILVUS_IMAGE:-milvusdb/milvus}:${MILVUS_VERSION:-v2.5.16}
+    container_name: ${MILVUS_CONTAINER_NAME:-milvus-standalone}
+    environment:
+      TZ: ${TZ:-Asia/Shanghai}
+      MINIO_REGION: ${MINIO_REGION:-us-east-1}
+      ETCD_ENDPOINTS: ${ETCD_ENDPOINTS:-etcd:2379}
+      MINIO_ADDRESS: ${MINIO_ADDRESS:-minio:9000}
+      MINIO_ACCESS_KEY: ${MINIO_ACCESS_KEY:-minioadmin}
+      MINIO_SECRET_KEY: ${MINIO_SECRET_KEY:-minioadmin}
+    ports:
+      - "${MILVUS_PORT:-19530}:19530"
+      - "${MILVUS_HTTP_PORT:-9091}:9091"
+    volumes:
+      - milvus_data:/var/lib/milvus
+    command: ["milvus", "run", "standalone"]
+    depends_on:
+      etcd:
+        condition: service_started
+      minio:
+        condition: service_started
+    logging: *default-logging
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:9091/healthz"]
+      interval: ${MILVUS_HEALTH_INTERVAL:-30s}
+      timeout: ${MILVUS_HEALTH_TIMEOUT:-20s}
+      retries: ${MILVUS_HEALTH_RETRIES:-5}
+      start_period: ${MILVUS_HEALTH_START_PERIOD:-120s}
+
+  # ========================================
+  # Redis 缓存服务配置覆盖
+  # ========================================
+  redis:
+    <<: *restart-policy
+    image: ${REDIS_IMAGE:-redis}:${REDIS_VERSION:-7-alpine}
+    container_name: ${REDIS_CONTAINER_NAME:-laiye_redis}
+    environment:
+      TZ: ${TZ:-Asia/Shanghai}
+    ports:
+      - "${REDIS_PORT:-6379}:6379"
+    volumes:
+      - redis_data:/data
+      - ${REDIS_CONFIG_PATH:-../redis/redis.conf}:/usr/local/etc/redis/redis.conf:ro
+    command: >
+      sh -c "
+        if [ -f /usr/local/etc/redis/redis.conf ]; then
+          redis-server /usr/local/etc/redis/redis.conf
+        else
+          redis-server --appendonly ${REDIS_AOF:-yes} 
+                      --maxmemory ${REDIS_MAX_MEMORY:-1gb} 
+                      --maxmemory-policy ${REDIS_MAX_MEMORY_POLICY:-allkeys-lru}
+                      --requirepass '${REDIS_PASSWORD:-}'
+                      --timeout ${REDIS_TIMEOUT:-0}
+                      --tcp-keepalive ${REDIS_TCP_KEEPALIVE:-300}
+                      --databases ${REDIS_DATABASES:-16}
+        fi
+      "
+    logging: *default-logging
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: ${REDIS_HEALTH_INTERVAL:-30s}
+      timeout: ${REDIS_HEALTH_TIMEOUT:-10s}
+      retries: ${REDIS_HEALTH_RETRIES:-3}
+
+  # ========================================
+  # Etcd 服务配置覆盖
+  # ========================================
+  etcd:
+    <<: *restart-policy
+    image: ${ETCD_IMAGE:-quay.io/coreos/etcd}:${ETCD_VERSION:-v3.5.18}
+    container_name: ${ETCD_CONTAINER_NAME:-milvus-etcd}
+    environment:
+      TZ: ${TZ:-Asia/Shanghai}
+      ETCD_AUTO_COMPACTION_MODE: ${ETCD_AUTO_COMPACTION_MODE:-revision}
+      ETCD_AUTO_COMPACTION_RETENTION: ${ETCD_AUTO_COMPACTION_RETENTION:-1000}
+      ETCD_QUOTA_BACKEND_BYTES: ${ETCD_QUOTA_BACKEND_BYTES:-4294967296}
+      ETCD_SNAPSHOT_COUNT: ${ETCD_SNAPSHOT_COUNT:-50000}
+      ETCD_MAX_REQUEST_BYTES: ${ETCD_MAX_REQUEST_BYTES:-33554432}
+      ETCD_MAX_TXN_OPS: ${ETCD_MAX_TXN_OPS:-128}
+    volumes:
+      - etcd_data:/etcd
+    command: >
+      etcd -advertise-client-urls=http://etcd:2379 
+           -listen-client-urls http://0.0.0.0:2379 
+           --data-dir /etcd
+    logging: *default-logging
+    healthcheck:
+      test: ["CMD", "etcdctl", "endpoint", "health"]
+      interval: ${ETCD_HEALTH_INTERVAL:-30s}
+      timeout: ${ETCD_HEALTH_TIMEOUT:-20s}
+      retries: ${ETCD_HEALTH_RETRIES:-3}
+      start_period: ${ETCD_HEALTH_START_PERIOD:-10s}
+
+  # ========================================
+  # MinIO 对象存储服务配置覆盖
+  # ========================================
+  minio:
+    <<: *restart-policy
+    image: ${MINIO_IMAGE:-minio/minio}:${MINIO_VERSION:-RELEASE.2024-05-28T17-19-04Z}
+    container_name: ${MINIO_CONTAINER_NAME:-milvus-minio}
+    environment:
+      TZ: ${TZ:-Asia/Shanghai}
+      MINIO_ACCESS_KEY: ${MINIO_ACCESS_KEY:-minioadmin}
+      MINIO_SECRET_KEY: ${MINIO_SECRET_KEY:-minioadmin}
+    ports:
+      - "${MINIO_CONSOLE_PORT:-9001}:9001"
+      - "${MINIO_API_PORT:-9000}:9000"
+    volumes:
+      - minio_data:/minio_data
+    command: >
+      minio server /minio_data 
+                   --console-address ":9001"
+                   --address ":9000"
+    logging: *default-logging
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:9000/minio/health/live"]
+      interval: ${MINIO_HEALTH_INTERVAL:-30s}
+      timeout: ${MINIO_HEALTH_TIMEOUT:-20s}
+      retries: ${MINIO_HEALTH_RETRIES:-3}
+      start_period: ${MINIO_HEALTH_START_PERIOD:-10s}
+
+  # ========================================
+  # Node.js 应用服务配置覆盖
+  # ========================================
+  nodejs-app:
+    <<: *restart-policy
+    image: ${NODEJS_IMAGE_NAME:-laiye-aifoundry-registry.cn-beijing.cr.aliyuncs.com/public/nodejs-app}:${NODEJS_IMAGE_TAG:-latest}
+    container_name: ${NODEJS_CONTAINER_NAME:-bubble_rag_nodejs_app}
+    environment:
+      TZ: ${TZ:-Asia/Shanghai}
+      # Node.js应用配置
+      NODE_ENV: ${NODE_ENV:-production}
+      PORT: ${NODEJS_SERVER_PORT:-3000}
+      HOSTNAME: ${NODEJS_SERVER_HOST:-0.0.0.0}
+      
+      # API配置
+      API_BASE_URL: ${API_BASE_URL:-http://bubble-rag-server:8000/bubble_rag}
+      TRAINING_API_BASE_URL: ${TRAINING_API_BASE_URL:-http://bubble-rag-sft-server:8001}
+      CORS_ORIGIN: ${NODEJS_CORS_ORIGINS:-*}
+      
+      # 日志配置
+      LOG_LEVEL: ${NODEJS_LOG_LEVEL:-info}
+      LOG_FORMAT: ${NODEJS_LOG_FORMAT:-combined}
+      
+      # 性能配置
+      UV_THREADPOOL_SIZE: ${NODEJS_UV_THREADPOOL_SIZE:-16}
+      NODE_OPTIONS: --max-old-space-size=${NODEJS_MAX_OLD_SPACE_SIZE:-2048}
+      
+      # 安全配置
+      HELMET_ENABLED: ${NODEJS_HELMET_ENABLED:-true}
+      TRUST_PROXY: ${NODEJS_TRUST_PROXY:-true}
+      SESSION_SECRET: ${NODEJS_SESSION_SECRET:-nodejs-session-secret}
+      
+      # Redis配置 (Node.js专用)
+      REDIS_URL: ${NODEJS_REDIS_URL:-redis://redis:6379}
+    ports:
+      - "${NODEJS_PORT:-3000}:${NODEJS_SERVER_PORT:-3000}"
+    volumes:
+      # 静态文件挂载
+      - ${STATIC_FILES_PATH:-./public}:/app/public:ro
+      # 上传文件挂载
+      - nodejs_uploads:/app/uploads
+      # 日志挂载
+      - ${NODEJS_LOGS_PATH:-./logs/nodejs}:/app/logs
+      # 配置文件挂载
+      - ${NODEJS_CONFIG_PATH:-./config/nodejs}:/app/config:ro
+    depends_on:
+      bubble-rag-server:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+    logging: *default-logging
+    deploy:
+      resources:
+        limits:
+          memory: ${NODEJS_MEMORY_LIMIT:-1G}
+          cpus: ${NODEJS_CPU_LIMIT:-1.0}
+        reservations:
+          memory: ${NODEJS_MEMORY_RESERVE:-256M}
+          cpus: ${NODEJS_CPU_RESERVE:-0.25}
+    healthcheck:
+      test: ["CMD", "curl -f http://localhost:${NODEJS_SERVER_PORT:-3000}${NODEJS_HEALTH_PATH:-/health}"]
+      interval: ${NODEJS_HEALTH_INTERVAL:-5s}
+      timeout: ${NODEJS_HEALTH_TIMEOUT:-5s}
+      retries: ${NODEJS_HEALTH_RETRIES:-30}
+      start_period: ${NODEJS_HEALTH_START_PERIOD:-30s}
+
+
+
+# ========================================
+# 卷配置
+# ========================================
+volumes:
+  mysql_data:
+    name: ${MYSQL_DATA_VOLUME:-bubble_rag_mysql_data}
+    driver: ${VOLUME_DRIVER:-local}
+  
+  milvus_data:
+    name: ${MILVUS_DATA_VOLUME:-bubble_rag_milvus_data}
+    driver: ${VOLUME_DRIVER:-local}
+  
+  etcd_data:
+    name: ${ETCD_DATA_VOLUME:-bubble_rag_etcd_data}
+    driver: ${VOLUME_DRIVER:-local}
+  
+  minio_data:
+    name: ${MINIO_DATA_VOLUME:-bubble_rag_minio_data}
+    driver: ${VOLUME_DRIVER:-local}
+  
+  redis_data:
+    name: ${REDIS_DATA_VOLUME:-bubble_rag_redis_data}
+    driver: ${VOLUME_DRIVER:-local}
+  
+  rag_uploads:
+    name: ${RAG_UPLOADS_VOLUME:-bubble_rag_uploads}
+    driver: ${VOLUME_DRIVER:-local}
+  
+  nodejs_uploads:
+    name: ${NODEJS_UPLOADS_VOLUME:-nodejs_uploads}
+    driver: ${VOLUME_DRIVER:-local}
+  
+  nodejs_redis_data:
+    name: ${NODEJS_REDIS_DATA_VOLUME:-nodejs_redis_data}
+    driver: ${VOLUME_DRIVER:-local}
+
+# ========================================
+# 网络配置
+# ========================================
+networks:
+  bubble_rag_network:
+    name: ${RAG_NETWORK_NAME:-bubble_rag_network}
+    driver: ${NETWORK_DRIVER:-bridge}
+    ipam:
+      config:
+        - subnet: ${RAG_NETWORK_SUBNET:-172.20.0.0/16}
+          gateway: ${RAG_NETWORK_GATEWAY:-172.20.0.1}
+  
+  nodejs_network:
+    name: ${NODEJS_NETWORK_NAME:-nodejs_network}
+    driver: ${NETWORK_DRIVER:-bridge}
+    ipam:
+      config:
+        - subnet: ${NODEJS_NETWORK_SUBNET:-172.21.0.0/16}
+          gateway: ${NODEJS_NETWORK_GATEWAY:-172.21.0.1}
