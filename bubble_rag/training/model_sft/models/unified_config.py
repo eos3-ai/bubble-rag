@@ -55,6 +55,8 @@ class UnifiedTrainingConfig(BaseModel):
     bf16: Optional[bool] = Field(default=False, description="是否使用BF16精度")
     gradient_checkpointing: Optional[bool] = Field(default=False, description="是否使用梯度检查点")
     dataloader_num_workers: Optional[int] = Field(default=4, description="数据加载器工作进程数")
+    dataloader_drop_last: Optional[bool] = Field(default=False, description="丢弃最后一个不完整的batch")
+    eval_accumulation_steps: Optional[int] = Field(default=None, ge=1, description="评估累积步数")
     
     # === 高级配置 ===
     seed: Optional[int] = Field(default=42, description="随机种子")
@@ -62,10 +64,14 @@ class UnifiedTrainingConfig(BaseModel):
     report_to: Optional[List[str]] = Field(default=None, description="上报训练指标的工具列表")
     
     # === 数据集采样 ===
-    train_sample_size: Optional[int] = Field(default=0, ge=0, le=10000000, description="训练数据集样本数量限制，0表示不限制")
-    eval_sample_size: Optional[int] = Field(default=0, ge=0, le=10000000, description="验证数据集样本数量限制，0表示不限制")
-    test_sample_size: Optional[int] = Field(default=0, ge=0, le=10000000, description="测试数据集样本数量限制，0表示不限制")
-    
+    train_sample_size: Optional[int] = Field(default=-1, ge=-1, le=10000000, description="训练数据集样本数量限制，-1表示不限制，0表示不使用该数据集")
+    eval_sample_size: Optional[int] = Field(default=-1, ge=-1, le=10000000, description="验证数据集样本数量限制，-1表示不限制，0表示不使用该数据集")
+    test_sample_size: Optional[int] = Field(default=-1, ge=-1, le=10000000, description="测试数据集样本数量限制，-1表示不限制，0表示不使用该数据集")
+
+    # === 前端展示目录参数 ===
+    user_logging_dir: Optional[str] = Field(default=None, description="前端展示用的日志目录，默认为{output_dir}/logs")
+    user_eval_dir: Optional[str] = Field(default=None, description="前端展示用的评估结果目录，默认为{output_dir}/eval")
+
     # === 扩展参数 ===
     training_params: Optional[Dict[str, Any]] = Field(default=None, description="额外的训练参数")
 

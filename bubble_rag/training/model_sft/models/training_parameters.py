@@ -1,17 +1,17 @@
 """
-HuggingFace 训练参数管理器
-统一管理训练参数，避免使用环境变量方式，改用结构化参数管理
+训练参数管理器 - 升级到 Pydantic v2
+明确区分官方训练参数和自定义参数
 """
 
 import os
 import logging
-from typing import Dict, Any, Optional, Union
-from pydantic import BaseModel, ConfigDict, Field, validator
+from typing import Dict, Any, Optional, Union, List
+from pydantic import BaseModel, ConfigDict, Field, field_validator
 from enum import Enum
 
 from ..enums.training_parameter_enums import (
-    ReportTo, OptimType, LRSchedulerType, EvalStrategy, 
-    SaveStrategy, LoggingStrategy
+    ReportTo, OptimType, LRSchedulerType,
+    EvalStrategy, SaveStrategy, LoggingStrategy, HubStrategy, SwanLabMode, DDPBackend
 )
 
 logger = logging.getLogger(__name__)
@@ -19,147 +19,261 @@ logger = logging.getLogger(__name__)
 
 
 class TrainingParameters(BaseModel):
-    """HuggingFace训练参数管理类"""
+    """
+    训练参数管理类 - 基于官方 CrossEncoderTrainingArguments 规范
+    明确区分官方训练参数和自定义参数
+    """
     model_config = ConfigDict(
-        protected_namespaces=(),
-        use_enum_values=True,
-        validate_assignment=True
+        extra='forbid',  # 禁止额外字段，增加安全性
+        validate_assignment=True,  # 赋值时验证
+        str_strip_whitespace=True,  # 自动去除字符串空白
+        protected_namespaces=(),  # 解决model_name_or_path冲突警告
     )
-    
-    # 基础训练参数
-    num_train_epochs: int = Field(default=3, ge=1, description="训练轮数")
-    per_device_train_batch_size: int = Field(default=16, ge=1, description="每设备训练批次大小")
-    per_device_eval_batch_size: int = Field(default=16, ge=1, description="每设备评估批次大小")
+
+    # ============================================================================
+    # 官方训练参数 (会传给 CrossEncoderTrainingArguments / SentenceTransformerTrainingArguments)
+    # ============================================================================
+
+    # === 基础训练参数 ===
+    output_dir: Optional[str] = Field(default=None, description="输出目录")
+    overwrite_output_dir: bool = Field(default=False, description="是否覆盖输出目录")
+    do_train: bool = Field(default=False, description="是否进行训练")
+    do_eval: bool = Field(default=False, description="是否进行评估")
+    do_predict: bool = Field(default=False, description="是否进行预测")
+    num_train_epochs: float = Field(default=3.0, gt=0, description="训练轮次")
+    per_device_train_batch_size: int = Field(default=8, ge=1, description="每设备训练批次大小")
+    per_device_eval_batch_size: int = Field(default=8, ge=1, description="每设备评估批次大小")
+
+    # === 学习率和优化器参数 ===
     learning_rate: float = Field(default=5e-5, gt=0, description="学习率")
+    warmup_ratio: float = Field(default=0.0, ge=0, le=1, description="预热比例")
+    warmup_steps: int = Field(default=0, ge=0, description="预热步数")
     weight_decay: float = Field(default=0.0, ge=0, description="权重衰减")
-    
-    # 学习率调度
-    warmup_ratio: float = Field(default=0.1, ge=0, le=1, description="预热比例")
-    lr_scheduler_type: LRSchedulerType = Field(default=LRSchedulerType.LINEAR, description="学习率调度器类型")
-    
-    # 优化器参数
-    optim: OptimType = Field(default=OptimType.ADAMW_TORCH, description="优化器类型")
-    adam_beta1: float = Field(default=0.9, ge=0, le=1, description="Adam beta1参数")
-    adam_beta2: float = Field(default=0.999, ge=0, le=1, description="Adam beta2参数")
-    adam_epsilon: float = Field(default=1e-8, gt=0, description="Adam epsilon参数")
-    max_grad_norm: float = Field(default=1.0, gt=0, description="梯度裁剪最大值")
-    
-    # 混合精度
-    bf16: bool = Field(default=False, description="是否使用bf16混合精度")
-    fp16: bool = Field(default=False, description="是否使用fp16混合精度")
-    
-    # 评估和保存
-    eval_strategy: EvalStrategy = Field(default=EvalStrategy.STEPS, description="评估策略")
-    eval_steps: Optional[int] = Field(default=500, ge=1, description="评估步数间隔")
-    save_strategy: SaveStrategy = Field(default=SaveStrategy.STEPS, description="保存策略")
-    save_steps: Optional[int] = Field(default=500, ge=1, description="保存步数间隔")
-    save_total_limit: int = Field(default=2, ge=1, description="保存模型的最大数量")
-    
-    # 日志记录
-    logging_strategy: LoggingStrategy = Field(default=LoggingStrategy.STEPS, description="日志策略")
-    logging_steps: int = Field(default=100, ge=1, description="日志记录步数间隔")
-    logging_dir: Optional[str] = Field(default=None, description="日志目录")
-    
-    # 梯度累积和数据加载
+    adam_beta1: float = Field(default=0.9, ge=0, le=1, description="Adam beta1")
+    adam_beta2: float = Field(default=0.999, ge=0, le=1, description="Adam beta2")
+    adam_epsilon: float = Field(default=1e-8, gt=0, description="Adam epsilon")
+    max_grad_norm: float = Field(default=1.0, gt=0, description="最大梯度范数")
+
+    # === 训练策略参数 ===
     gradient_accumulation_steps: int = Field(default=1, ge=1, description="梯度累积步数")
-    dataloader_num_workers: int = Field(default=0, ge=0, description="数据加载器工作进程数")
-    dataloader_drop_last: bool = Field(default=False, description="是否丢弃最后不完整的批次")
-    
-    # 训练控制
-    max_steps: Optional[int] = Field(default=None, description="最大训练步数")
+    eval_strategy: EvalStrategy = Field(default=EvalStrategy.NO, description="评估策略: no, steps, epoch")
+    save_strategy: SaveStrategy = Field(default=SaveStrategy.STEPS, description="保存策略: no, steps, epoch")
+    logging_strategy: LoggingStrategy = Field(default=LoggingStrategy.STEPS, description="日志策略: no, steps, epoch")
+    logging_steps: float = Field(default=500, gt=0, description="日志记录步数")
+    max_steps: int = Field(default=-1, description="最大训练步数，-1表示使用epoch")
+
+    # === 步数参数（可选） ===
+    eval_steps: Optional[float] = Field(default=None, gt=0, description="评估步数")
+    save_steps: float = Field(default=500, gt=0, description="保存步数")
+    save_total_limit: Optional[int] = Field(default=None, ge=1, description="保存模型数量限制")
+
+    # === 数据加载参数 ===
+    dataloader_num_workers: int = Field(default=0, ge=0, description="数据加载器工作线程数")
+    dataloader_drop_last: bool = Field(default=False, description="丢弃最后一个不完整的batch")
+    eval_accumulation_steps: Optional[int] = Field(default=None, ge=1, description="评估累积步数")
+
+    # === 混合精度训练 ===
+    bf16: bool = Field(default=False, description="使用bf16混合精度")
+    fp16: bool = Field(default=False, description="使用fp16混合精度")
+    gradient_checkpointing: bool = Field(default=False, description="使用梯度检查点")
+
+    # === 模型评估和保存 ===
+    load_best_model_at_end: Optional[bool] = Field(default=False, description="训练结束时加载最佳模型")
+    metric_for_best_model: Optional[str] = Field(default=None, description="最佳模型指标")
+    greater_is_better: Optional[bool] = Field(default=None, description="指标越大越好")
+
+    # === 系统和调试参数 ===
     seed: int = Field(default=42, description="随机种子")
-    
-    # 评估控制
-    eval_accumulation_steps: Optional[int] = Field(default=None, description="评估累积步数")
-    load_best_model_at_end: bool = Field(default=False, description="是否在训练结束时加载最佳模型")
-    metric_for_best_model: Optional[str] = Field(default=None, description="用于判断最佳模型的指标")
-    greater_is_better: Optional[bool] = Field(default=None, description="指标是否越大越好")
-    
-    # 恢复和检查点
-    resume_from_checkpoint: Optional[str] = Field(default=None, description="从检查点恢复训练")
-    ignore_data_skip: bool = Field(default=False, description="是否忽略数据跳过")
-    
-    # Hub相关
-    push_to_hub: bool = Field(default=False, description="是否推送到Hub")
+    disable_tqdm: Optional[bool] = Field(default=None, description="禁用进度条")
+    report_to: Optional[Union[ReportTo, str, List[str]]] = Field(default=ReportTo.NONE, description="报告工具")
+    run_name: Optional[str] = Field(default=None, description="运行名称")
+
+    # === 数据处理参数 ===
+    remove_unused_columns: Optional[bool] = Field(default=True, description="移除未使用的列")
+    group_by_length: bool = Field(default=False, description="按长度分组")
+    length_column_name: Optional[str] = Field(default="length", description="长度列名称")
+    label_names: Optional[List[str]] = Field(default=None, description="标签名称列表")
+
+    # === 学习率调度器 ===
+    lr_scheduler_type: LRSchedulerType = Field(default=LRSchedulerType.LINEAR, description="学习率调度器类型")
+
+    # === 优化器 ===
+    optim: OptimType = Field(default=OptimType.ADAMW_TORCH, description="优化器类型")
+
+    # === Hub相关参数 ===
+    push_to_hub: bool = Field(default=False, description="推送到Hub")
     hub_model_id: Optional[str] = Field(default=None, description="Hub模型ID")
-    hub_strategy: str = Field(default="every_save", description="Hub推送策略")
-    hub_token: Optional[str] = Field(default=None, description="Hub访问令牌")
-    
-    # 数据处理
-    prediction_loss_only: bool = Field(default=False, description="是否只返回预测损失")
-    remove_unused_columns: bool = Field(default=True, description="是否移除未使用的列")
-    label_names: Optional[list] = Field(default=None, description="标签列名称列表")
-    group_by_length: bool = Field(default=False, description="是否按长度分组")
-    length_column_name: Optional[str] = Field(default=None, description="长度列名称")
-    
-    # 分布式训练
-    local_rank: int = Field(default=-1, description="本地rank")
-    nproc_per_node: int = Field(default=1, ge=1, description="每节点进程数")
-    
-    # 报告工具
-    report_to: Optional[Union[ReportTo, str, list]] = Field(default=ReportTo.NONE, description="报告工具")
-    
-    # SwanLab相关参数（可选）
+    hub_strategy: HubStrategy = Field(default=HubStrategy.EVERY_SAVE, description="Hub策略")
+    hub_token: Optional[str] = Field(default=None, description="Hub token")
+
+    # === 日志和检查点 ===
+    logging_dir: Optional[str] = Field(default=None, description="日志目录")
+    resume_from_checkpoint: Optional[str] = Field(default=None, description="从检查点恢复")
+
+    # === 分布式训练 ===
+    ddp_backend: Optional[DDPBackend] = Field(default=None, description="DDP后端")
+
+    # === DeepSpeed ===
+    deepspeed: Optional[str] = Field(default=None, description="DeepSpeed配置文件路径")
+
+    # === 其他重要参数 ===
+    prediction_loss_only: bool = Field(default=False, description="仅预测损失")
+    ignore_data_skip: bool = Field(default=False, description="忽略数据跳过")
+
+    # ============================================================================
+    # 自定义参数 (不会传给官方 TrainingArguments，由我们的系统内部使用)
+    # ============================================================================
+
+    # === SwanLab配置 ===
     swanlab_api_key: Optional[str] = Field(default=None, description="SwanLab API密钥")
     swanlab_workspace: Optional[str] = Field(default=None, description="SwanLab工作空间")
     swanlab_project: Optional[str] = Field(default=None, description="SwanLab项目名")
     swanlab_experiment: Optional[str] = Field(default=None, description="SwanLab实验名称")
-    swanlab_mode: Optional[str] = Field(default=None, description="SwanLab模式 (local/cloud)")
+    swanlab_mode: Optional[SwanLabMode] = Field(default=None, description="SwanLab模式 (local/cloud)")
+
+    # === 数据集采样参数 ===
+    train_sample_size: Optional[int] = Field(default=-1, ge=-1, le=10000000, description="训练数据集样本数量限制，-1表示不限制，0表示不使用该数据集")
+    eval_sample_size: Optional[int] = Field(default=-1, ge=-1, le=10000000, description="验证数据集样本数量限制，-1表示不限制，0表示不使用该数据集")
+    test_sample_size: Optional[int] = Field(default=-1, ge=-1, le=10000000, description="测试数据集样本数量限制，-1表示不限制，0表示不使用该数据集")
+
+    # === 运行时参数 ===
+    user_logging_dir: Optional[str] = Field(default=None, description="前端展示用的日志目录，默认为{output_dir}/logs")
+    user_eval_dir: Optional[str] = Field(default=None, description="前端展示用的评估结果目录，默认为{output_dir}/eval")
+
+
+    # === 数据集和模型路径（由系统管理，不传给训练器）===
+    dataset_name_or_path: Optional[str] = Field(default=None, description="数据集路径")
+    model_name_or_path: Optional[str] = Field(default=None, description="模型路径")
+    train_type: Optional[str] = Field(default=None, description="训练类型")
+    task_id: Optional[str] = Field(default=None, description="任务ID")
+    task_name: Optional[str] = Field(default=None, description="任务名称")
+    description: Optional[str] = Field(default=None, description="任务描述")
+    HF_subset: Optional[str] = Field(default=None, description="HuggingFace数据集子集")
+    device: Optional[str] = Field(default=None, description="设备信息")
+
+    # === 模型参数（不传递给训练器，由系统内部处理）===
+    max_seq_length: Optional[int] = Field(default=512, gt=0, description="最大序列长度")
     
-    # 数据集采样参数
-    train_sample_size: Optional[int] = Field(default=0, ge=0, le=10000000, description="训练数据集样本数量限制，0表示不限制")
-    eval_sample_size: Optional[int] = Field(default=0, ge=0, le=10000000, description="验证数据集样本数量限制，0表示不限制")
-    test_sample_size: Optional[int] = Field(default=0, ge=0, le=10000000, description="测试数据集样本数量限制，0表示不限制")
-    
-    # 运行时参数（不从配置文件加载）
-    output_dir: str = Field(default="./output", description="输出目录")
-    run_name: Optional[str] = Field(default=None, description="运行名称")
-    user_logging_dir: Optional[str] = Field(default=None, description="用户指定的日志目录")
-    
-    @validator('bf16', 'fp16')
-    def validate_precision(cls, v, values):
-        """验证混合精度设置，确保不同时启用bf16和fp16"""
-        if v and values.get('bf16' if 'fp16' in values else 'fp16'):
-            raise ValueError("不能同时启用bf16和fp16")
-        return v
-    
-    @validator('eval_steps')
-    def validate_eval_steps(cls, v, values):
-        """验证评估步数设置"""
-        eval_strategy = values.get('eval_strategy')
-        if eval_strategy == EvalStrategy.STEPS and v is None:
-            raise ValueError("使用steps评估策略时必须设置eval_steps")
-        return v
-    
-    @validator('save_steps')
-    def validate_save_steps(cls, v, values):
-        """验证保存步数设置"""
-        save_strategy = values.get('save_strategy')
-        if save_strategy == SaveStrategy.STEPS and v is None:
-            raise ValueError("使用steps保存策略时必须设置save_steps")
-        return v
-    
-    @validator('report_to')
+
+
+
+    @field_validator('report_to')
+    @classmethod
     def validate_report_to(cls, v):
         """验证报告工具设置"""
         if v is None:
             return v
-        
+
+        # 如果是ReportTo枚举，直接返回其值
+        if isinstance(v, ReportTo):
+            return v.value
+
         # 如果是列表，验证每个元素
         if isinstance(v, list):
             valid_values = [item.value for item in ReportTo]
             for item in v:
                 if isinstance(item, str) and item not in valid_values:
-                    raise ValueError(f"无效的报告工具: {item}, 支持的工具: {valid_values}")
+                    logger.warning(f"无效的报告工具: {item}, 支持的工具: {valid_values}")
             return v
-        
+
         # 如果是字符串，验证是否在枚举中
         if isinstance(v, str):
             valid_values = [item.value for item in ReportTo]
             if v not in valid_values:
-                raise ValueError(f"无效的报告工具: {v}, 支持的工具: {valid_values}")
-            
+                logger.warning(f"无效的报告工具: {v}, 支持的工具: {valid_values}")
+
         return v
+
+    def model_post_init(self, __context) -> None:
+        """模型初始化后的验证"""
+        # 验证bf16和fp16不能同时启用
+        if self.bf16 and self.fp16:
+            raise ValueError("bf16和fp16不能同时启用")
+
+        # 验证steps策略下必须设置对应的步数
+        if self.eval_strategy == EvalStrategy.STEPS and self.eval_steps is None:
+            raise ValueError("eval_strategy为steps时必须设置eval_steps")
+        if self.save_strategy == SaveStrategy.STEPS and self.save_steps is None:
+            raise ValueError("save_strategy为steps时必须设置save_steps")
+
+    # ============================================================================
+    # 参数分离方法 - 明确区分官方训练参数和自定义参数
+    # ============================================================================
+
+    @classmethod
+    def get_official_training_param_names(cls) -> set:
+        """获取官方训练参数名称列表（会传给 *TrainingArguments）"""
+        return {
+            # 基础训练参数
+            'output_dir', 'overwrite_output_dir', 'do_train', 'do_eval', 'do_predict',
+            'num_train_epochs', 'per_device_train_batch_size', 'per_device_eval_batch_size',
+
+            # 学习率和优化器参数
+            'learning_rate', 'warmup_ratio', 'warmup_steps', 'weight_decay',
+            'adam_beta1', 'adam_beta2', 'adam_epsilon', 'max_grad_norm',
+
+            # 训练策略参数
+            'gradient_accumulation_steps', 'eval_strategy', 'save_strategy',
+            'logging_strategy', 'logging_steps', 'max_steps',
+
+            # 步数参数
+            'eval_steps', 'save_steps', 'save_total_limit',
+
+            # 数据加载参数
+            'dataloader_num_workers', 'dataloader_drop_last', 'eval_accumulation_steps',
+
+            # 混合精度训练
+            'bf16', 'fp16', 'gradient_checkpointing',
+
+            # 模型评估和保存
+            'load_best_model_at_end', 'metric_for_best_model', 'greater_is_better',
+
+            # 系统和调试参数
+            'seed', 'disable_tqdm', 'run_name',
+            # 注意：report_to 被排除，我们用它来控制环境变量而不是直接传递给TrainingArguments
+
+            # 数据处理参数
+            'remove_unused_columns', 'group_by_length', 'length_column_name', 'label_names',
+
+            # 学习率调度器和优化器
+            'lr_scheduler_type', 'optim',
+
+            # Hub相关参数
+            'push_to_hub', 'hub_model_id', 'hub_strategy', 'hub_token',
+
+            # 日志和检查点
+            'logging_dir', 'resume_from_checkpoint',
+
+            # 分布式训练和DeepSpeed
+            'ddp_backend', 'deepspeed',
+
+            # 其他重要参数
+            'prediction_loss_only', 'ignore_data_skip',
+
+            # 报告工具（需要传递但进行特殊处理）
+            'report_to'
+        }
+
+    @classmethod
+    def get_custom_param_names(cls) -> set:
+        """获取自定义参数名称列表（不会传给官方 TrainingArguments）"""
+        return {
+            # SwanLab配置
+            'swanlab_api_key', 'swanlab_workspace', 'swanlab_project', 'swanlab_experiment', 'swanlab_mode',
+
+            # 数据集采样参数
+            'train_sample_size', 'eval_sample_size', 'test_sample_size',
+
+            # 运行时参数
+            'user_logging_dir', 'user_eval_dir',
+
+            # 数据集和模型路径
+            'dataset_name_or_path', 'model_name_or_path', 'train_type',
+            'task_id', 'task_name', 'description', 'HF_subset', 'device',
+
+            # 模型参数（不传递给训练器，由系统内部处理）
+            'max_seq_length'
+        }
 
 
 class TrainingParametersManager:
@@ -190,138 +304,99 @@ class TrainingParametersManager:
         
         try:
             self._training_params = TrainingParameters(**merged_config)
+
+            # 自动设置前端展示目录为固定格式
+            if self._training_params.output_dir:
+                output_dir = self._training_params.output_dir
+                auto_user_logging_dir = f"{output_dir}/logs"
+                auto_user_eval_dir = f"{output_dir}/eval"
+
+                # 更新参数
+                updated_config = merged_config.copy()
+                updated_config['user_logging_dir'] = auto_user_logging_dir
+                updated_config['user_eval_dir'] = auto_user_eval_dir
+                self._training_params = TrainingParameters(**updated_config)
+
+                logger.info(f"自动设置前端展示目录:")
+                logger.info(f"  - 用户日志目录: {auto_user_logging_dir}")
+                logger.info(f"  - 用户评估目录: {auto_user_eval_dir}")
+
             logger.info("训练参数加载成功")
             self._log_parameters()
         except Exception as e:
             logger.error(f"训练参数验证失败: {e}")
             raise ValueError(f"无效的训练参数配置: {e}")
-        
+
         return self
-    
-    def load_from_environment(self, env_prefix: str = "") -> 'TrainingParametersManager':
-        """
-        从环境变量加载参数（用于向后兼容）
-        
-        Args:
-            env_prefix: 环境变量前缀
-            
-        Returns:
-            self，支持链式调用
-        """
-        # HuggingFace训练参数映射
-        hf_params_mapping = {
-            "NUM_TRAIN_EPOCHS": "num_train_epochs",
-            "PER_DEVICE_TRAIN_BATCH_SIZE": "per_device_train_batch_size",
-            "PER_DEVICE_EVAL_BATCH_SIZE": "per_device_eval_batch_size",
-            "LEARNING_RATE": "learning_rate",
-            "WARMUP_RATIO": "warmup_ratio",
-            "LR_SCHEDULER_TYPE": "lr_scheduler_type",
-            "BF16": "bf16",
-            "FP16": "fp16",
-            "EVAL_STRATEGY": "eval_strategy",
-            "EVAL_STEPS": "eval_steps",
-            "SAVE_STRATEGY": "save_strategy",
-            "SAVE_STEPS": "save_steps",
-            "SAVE_TOTAL_LIMIT": "save_total_limit",
-            "LOGGING_STEPS": "logging_steps",
-            "LOGGING_STRATEGY": "logging_strategy",
-            "LOGGING_DIR": "logging_dir",
-            "GRADIENT_ACCUMULATION_STEPS": "gradient_accumulation_steps",
-            "MAX_STEPS": "max_steps",
-            "DATALOADER_NUM_WORKERS": "dataloader_num_workers",
-            "WEIGHT_DECAY": "weight_decay",
-            "ADAM_BETA1": "adam_beta1",
-            "ADAM_BETA2": "adam_beta2",
-            "ADAM_EPSILON": "adam_epsilon",
-            "MAX_GRAD_NORM": "max_grad_norm",
-            "SEED": "seed",
-            "DATALOADER_DROP_LAST": "dataloader_drop_last",
-            "EVAL_ACCUMULATION_STEPS": "eval_accumulation_steps",
-            "LOAD_BEST_MODEL_AT_END": "load_best_model_at_end",
-            "METRIC_FOR_BEST_MODEL": "metric_for_best_model",
-            "GREATER_IS_BETTER": "greater_is_better",
-            "IGNORE_DATA_SKIP": "ignore_data_skip",
-            "RESUME_FROM_CHECKPOINT": "resume_from_checkpoint",
-            "PUSH_TO_HUB": "push_to_hub",
-            "HUB_MODEL_ID": "hub_model_id",
-            "HUB_STRATEGY": "hub_strategy",
-            "HUB_TOKEN": "hub_token",
-            "PREDICTION_LOSS_ONLY": "prediction_loss_only",
-            "REMOVE_UNUSED_COLUMNS": "remove_unused_columns",
-            "LABEL_NAMES": "label_names",
-            "LOCAL_RANK": "local_rank",
-            "OPTIM": "optim",
-            "GROUP_BY_LENGTH": "group_by_length",
-            "LENGTH_COLUMN_NAME": "length_column_name",
-            "REPORT_TO": "report_to",
-            "NPROC_PER_NODE": "nproc_per_node",
-            # SwanLab相关参数
-            "SWANLAB_API_KEY": "swanlab_api_key",
-            "SWANLAB_WORKSPACE": "swanlab_workspace", 
-            "SWANLAB_PROJECT": "swanlab_project",
-            "SWANLAB_EXPERIMENT": "swanlab_experiment",
-            "SWANLAB_MODE": "swanlab_mode",
-            # 数据集采样参数
-            "TRAIN_SAMPLE_SIZE": "train_sample_size",
-            "EVAL_SAMPLE_SIZE": "eval_sample_size", 
-            "TEST_SAMPLE_SIZE": "test_sample_size"
-        }
-        
-        config = {}
-        
-        # 从环境变量读取参数
-        for env_key, param_key in hf_params_mapping.items():
-            full_env_key = f"{env_prefix}{env_key}" if env_prefix else env_key
-            env_value = os.getenv(full_env_key)
-            
-            if env_value is not None:
-                # 类型转换
-                try:
-                    if param_key in ['num_train_epochs', 'per_device_train_batch_size', 'per_device_eval_batch_size',
-                                   'gradient_accumulation_steps', 'eval_steps', 'save_steps', 'save_total_limit',
-                                   'logging_steps', 'max_steps', 'dataloader_num_workers', 'eval_accumulation_steps',
-                                   'seed', 'local_rank', 'nproc_per_node', 'train_sample_size', 'eval_sample_size', 'test_sample_size']:
-                        config[param_key] = int(env_value)
-                    elif param_key in ['learning_rate', 'warmup_ratio', 'weight_decay', 'adam_beta1', 'adam_beta2',
-                                     'adam_epsilon', 'max_grad_norm']:
-                        config[param_key] = float(env_value)
-                    elif param_key in ['bf16', 'fp16', 'dataloader_drop_last', 'load_best_model_at_end',
-                                     'greater_is_better', 'ignore_data_skip', 'push_to_hub', 'prediction_loss_only',
-                                     'remove_unused_columns', 'group_by_length']:
-                        config[param_key] = env_value.lower() in ('true', '1', 'yes', 'on')
-                    else:
-                        config[param_key] = env_value
-                        
-                    logger.debug(f"从环境变量加载参数: {param_key} = {config[param_key]}")
-                except (ValueError, TypeError) as e:
-                    logger.warning(f"环境变量 {full_env_key} 值转换失败: {e}")
-        
-        # 合并自定义参数
-        config.update(self.custom_params)
-        
-        return self.load_from_config(config)
     
     def get_training_args_dict(self) -> Dict[str, Any]:
         """
-        获取训练参数字典，用于传递给HuggingFace训练器
-        
+        获取官方训练参数字典，用于传递给 CrossEncoderTrainingArguments / SentenceTransformerTrainingArguments
+
         Returns:
-            训练参数字典
+            只包含官方训练参数的字典
         """
         if self._training_params is None:
-            raise ValueError("训练参数未初始化，请先调用load_from_config或load_from_environment")
-        
-        # 转换为字典并排除None值
-        params_dict = self._training_params.model_dump(exclude_none=True, by_alias=True)
-        
+            raise ValueError("训练参数未初始化，请先调用load_from_config")
+
+        # 获取所有参数（不排除None值，因为save_total_limit=None是有意义的）
+        all_params = self._training_params.model_dump(exclude_unset=True)
+
+        # 只保留官方训练参数
+        official_param_names = TrainingParameters.get_official_training_param_names()
+        training_args_dict = {
+            k: v for k, v in all_params.items()
+            if k in official_param_names
+        }
+
         # 特殊处理某些参数
-        if 'report_to' in params_dict and isinstance(params_dict['report_to'], str):
-            if params_dict['report_to'] in ['none', '']:
-                params_dict['report_to'] = []
-            else:
-                params_dict['report_to'] = [params_dict['report_to']]
-        
-        return params_dict
+        if 'report_to' in training_args_dict:
+            report_to_value = training_args_dict['report_to']
+
+            # 处理枚举类型
+            if hasattr(report_to_value, 'value'):
+                report_to_value = report_to_value.value
+
+            # 处理字符串和列表
+            if isinstance(report_to_value, str):
+                if report_to_value in ['none', '']:
+                    training_args_dict['report_to'] = []
+                else:
+                    training_args_dict['report_to'] = [report_to_value]
+            elif isinstance(report_to_value, list):
+                # 已经是列表，检查是否包含none
+                filtered_list = [item for item in report_to_value if item not in ['none', '']]
+                training_args_dict['report_to'] = filtered_list if filtered_list else []
+        else:
+            # 关键修复：如果没有设置report_to，显式设置为空列表，避免HuggingFace自动检测报告工具
+            training_args_dict['report_to'] = []
+            logger.info("未设置report_to参数，显式设置为空列表以禁用所有报告工具")
+
+        logger.info(f"获取官方训练参数: {len(training_args_dict)} 个参数")
+        return training_args_dict
+
+    def get_custom_params_dict(self) -> Dict[str, Any]:
+        """
+        获取自定义参数字典，用于系统内部处理
+
+        Returns:
+            只包含自定义参数的字典
+        """
+        if self._training_params is None:
+            raise ValueError("训练参数未初始化，请先调用load_from_config")
+
+        # 获取所有参数（不排除None值）
+        all_params = self._training_params.model_dump(exclude_unset=True)
+
+        # 只保留自定义参数
+        custom_param_names = TrainingParameters.get_custom_param_names()
+        custom_params_dict = {
+            k: v for k, v in all_params.items()
+            if k in custom_param_names
+        }
+
+        logger.info(f"获取自定义参数: {len(custom_params_dict)} 个参数")
+        return custom_params_dict
     
     def get_training_parameters(self) -> TrainingParameters:
         """
@@ -331,7 +406,7 @@ class TrainingParametersManager:
             训练参数对象
         """
         if self._training_params is None:
-            raise ValueError("训练参数未初始化，请先调用load_from_config或load_from_environment")
+            raise ValueError("训练参数未初始化，请先调用load_from_config")
         
         return self._training_params
     
@@ -346,7 +421,7 @@ class TrainingParametersManager:
             self，支持链式调用
         """
         if self._training_params is None:
-            raise ValueError("训练参数未初始化，请先调用load_from_config或load_from_environment")
+            raise ValueError("训练参数未初始化，请先调用load_from_config")
         
         # 创建更新后的参数字典
         current_dict = self._training_params.model_dump()

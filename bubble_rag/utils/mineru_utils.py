@@ -122,7 +122,7 @@ def mineru_parse_pdf_doc(
             ocr: Use OCR method for image-based PDFs.
             Without method specified, 'auto' will be used by default.
             Adapted only for the case where the backend is set to "pipeline".
-        server_url: When the backend is `sglang-client`, you need to specify the server_url, for example:`http://127.0.0.1:30000`
+        server_url: When the backend is `sglang-client`, you need to specify the server_url, for example:`http://172.16.10.105:30000`
     """
     try:
         file_name = str(Path(file_path).stem)

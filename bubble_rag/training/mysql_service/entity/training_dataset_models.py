@@ -24,7 +24,7 @@ class DatasetInfo(SQLModel, table=True):
         Index('idx_task_source', 'task_id', 'data_source_id'),  # 新增：数据源分组索引
         Index('idx_task_source_split', 'task_id', 'data_source_id', 'split_type'),  # 新增：精确查询索引
         CheckConstraint('total_samples >= 0', name='chk_positive_samples_dataset'),
-        CheckConstraint('configured_sample_size >= 0', name='chk_positive_configured_sample_size'),
+        CheckConstraint('configured_sample_size >= -1', name='chk_positive_configured_sample_size'),
         {'comment': '数据集元信息'}
     )
     model_config = ConfigDict(protected_namespaces=())
@@ -46,7 +46,7 @@ class DatasetInfo(SQLModel, table=True):
     
     # 数据集内容信息
     total_samples: int = Field(default=0, sa_column=Column(Integer, comment='样本总数', nullable=False))
-    configured_sample_size: int = Field(default=0, sa_column=Column(Integer, comment='实际使用的样本数量（受配置限制影响）', nullable=False))
+    configured_sample_size: int = Field(default=-1, sa_column=Column(Integer, comment='实际使用的样本数量（受配置限制影响），-1表示不限制', nullable=False))
     target_column: str = Field(sa_column=Column(VARCHAR(64), comment='目标列名: score, label', nullable=False))
     label_type: str = Field(sa_column=Column(VARCHAR(32), comment='标签数据类型: int, float', nullable=False))
     column_names: Optional[Dict[str, Any]] = Field(sa_column=Column(JSON, comment='数据集列名信息'))

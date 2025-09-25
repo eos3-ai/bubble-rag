@@ -97,7 +97,7 @@ def setup_training_params_env(env: Dict[str, str], training_params: Dict) -> Dic
         "adam_epsilon", "max_grad_norm", "seed", "dataloader_drop_last", "eval_accumulation_steps",
         "load_best_model_at_end", "metric_for_best_model", "greater_is_better", "ignore_data_skip",
         "resume_from_checkpoint", "push_to_hub", "hub_model_id", "hub_strategy", "hub_token",
-        "prediction_loss_only", "remove_unused_columns", "label_names", "local_rank", "deepspeed",
+        "prediction_loss_only", "remove_unused_columns", "label_names", "deepspeed",
         "optim", "group_by_length", "length_column_name", "report_to", "ddpbackend", 
         "sample_size"
     ]

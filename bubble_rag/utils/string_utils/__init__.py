@@ -60,7 +60,8 @@ def findMaxTm(fnm):
 
 
 tiktoken_cache_dir = get_project_base_directory()
-os.environ["TIKTOKEN_CACHE_DIR"] = tiktoken_cache_dir
+# os.environ["TIKTOKEN_CACHE_DIR"] = tiktoken_cache_dir
+os.environ["TIKTOKEN_CACHE_DIR"] = '/app/tiktoken'
 # encoder = tiktoken.encoding_for_model("gpt-3.5-turbo")
 encoder = tiktoken.get_encoding("cl100k_base")
 

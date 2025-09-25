@@ -209,7 +209,7 @@ class TaskManager:
             self._save_tasks()
             return task
     
-    def update_task_progress(self, task_id: str, progress: float, log_message: str = None) -> Optional[TrainingTask]:
+    def update_task_progress(self, task_id: str, progress: float, log_message: str = None, force_db_update: bool = False) -> Optional[TrainingTask]:
         """更新任务进度（内存实时更新 + 数据库1%节流更新）"""
         with self._lock:
             task = self.tasks.get(task_id)
@@ -225,6 +225,7 @@ class TaskManager:
             # 数据库更新策略：进度变化超过1%才更新（提高同步频率）
             progress_change = abs(progress - last_db_progress)
             should_update_db = (
+                force_db_update or  # 🔧 强制数据库更新（用于关键进度重置）
                 progress_change >= 1 or  # 进度变化1%以上
                 (progress >= 100 and task.status == TrainingStatus.SUCCEEDED) or  # 🔧 只有状态为SUCCEEDED时才允许100%进度写入数据库
                 last_db_progress == -1  # 首次更新
@@ -288,7 +289,12 @@ class TaskManager:
                         logger.info(f"✅ embedding维度已同步到数据库: {embedding_dim}")
                     else:
                         # 对于非embedding任务，也要确保数据库和内存数据同步
-                        training_task_service.save_training_task(task)
+                        # 🔐 获取当前用户信息
+                        from bubble_rag.utils.user_manager import UserManager
+                        current_user = UserManager.validate_and_get_user()
+                        username = current_user.get('username', 'admin')
+
+                        training_task_service.save_training_task(task, username=username)
                         logger.info(f"✅ 任务信息已同步到数据库")
                 except Exception as db_e:
                     logger.warning(f"同步模型信息到数据库失败: {db_e}")

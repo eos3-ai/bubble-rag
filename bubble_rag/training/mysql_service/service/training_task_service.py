@@ -11,6 +11,7 @@ from bubble_rag.training.mysql_service.entity.training_task_models import Traini
 from bubble_rag.training.model_sft.models.training_task import TrainingTask
 from bubble_rag.training.model_sft.enums import TrainingStatus
 from bubble_rag.training.model_sft.utils.error_handler import handle_database_error, with_error_handling
+from bubble_rag.utils.user_manager import UserManager
 
 
 class TrainingTaskService:
@@ -59,8 +60,14 @@ class TrainingTaskService:
             "training_params": task_db.training_params,
             "embedding_dim": task_db.embedding_dim,
             "service_instance_id": task_db.service_instance_id,
+            "service_startup_time": task_db.service_startup_time,
+            "username": task_db.username,
             "process_pid": task_db.process_pid,
-            "process_status": task_db.process_status
+            "process_status": task_db.process_status,
+            "loss_data": task_db.loss_data,  # 训练损失数据
+            # 重启关系字段
+            "base_task_id": task_db.base_task_id,
+            "restart_count": task_db.restart_count
         }
     
     def ensure_tables_created(self) -> bool:
@@ -72,7 +79,7 @@ class TrainingTaskService:
             return False
     
     @with_error_handling(context="database", default_return=False)
-    def save_training_task(self, task: TrainingTask, training_params: Dict[str, Any] = None, service_instance_id: str = None) -> bool:
+    def save_training_task(self, task: TrainingTask, training_params: Dict[str, Any] = None, service_instance_id: str = None, username: str = None) -> bool:
         """保存训练任务到数据库"""
         with safe_get_session() as session:
             # 检查是否已存在
@@ -84,13 +91,32 @@ class TrainingTaskService:
                     existing.training_params = json.dumps(training_params, ensure_ascii=False)
                 if service_instance_id:
                     existing.service_instance_id = service_instance_id
+                # 更新用户信息（如果提供）
+                if username:
+                    existing.username = username
             else:
-                # 创建新记录
-                db_task = TrainingTaskDB.from_training_task(task, training_params)
-                # 🔧 service_instance_id 应该在进程实际启动时设置，而不是任务创建时
-                # 这样可以确保只有真正运行过的任务才有服务实例归属
-                if service_instance_id:
-                    db_task.service_instance_id = service_instance_id
+                # 创建新记录 - 传递正确的参数
+                # 🔐 确定用户名（用于权限控制）
+                if not username:
+                    # 如果没有提供用户名，使用当前用户
+                    current_user = UserManager.validate_and_get_user()
+                    username = current_user.get('username', 'admin')
+
+                db_task = TrainingTaskDB.from_training_task(
+                    task,
+                    training_params=training_params,
+                    username=username,
+                    service_instance_id=service_instance_id
+                )
+
+                # 新任务使用全局启动时间（这个时间在服务启动时就固定了）
+                try:
+                    from bubble_rag.model_sft_server import SERVICE_STARTUP_TIME
+                    if SERVICE_STARTUP_TIME:
+                        db_task.service_startup_time = SERVICE_STARTUP_TIME
+                except ImportError:
+                    # 如果无法导入，说明不是在服务环境中
+                    pass
                 session.add(db_task)
             
             session.commit()
@@ -109,18 +135,37 @@ class TrainingTaskService:
             print(f"根据任务ID获取训练任务失败: {e}")
             return None
     
-    def get_all_training_tasks(self, limit: int = 100, offset: int = 0) -> List[TrainingTaskDB]:
-        """获取所有训练任务"""
+    def get_all_training_tasks(self, limit: int = 100, offset: int = 0, service_instance_id: Optional[str] = None) -> List[TrainingTaskDB]:
+        """获取训练任务（建议使用get_tasks_by_service_instance代替）
+
+        Args:
+            limit: 限制返回数量
+            offset: 偏移量
+            service_instance_id: 服务实例ID，如果为None则返回所有任务（不推荐）
+
+        Warning:
+            不传service_instance_id参数可能导致跨服务实例数据泄露！
+            建议使用 get_tasks_by_service_instance() 方法代替。
+        """
         try:
             with safe_get_session() as session:
-                statement = select(TrainingTaskDB).order_by(TrainingTaskDB.created_at.desc()).limit(limit).offset(offset)
+                statement = select(TrainingTaskDB).order_by(TrainingTaskDB.created_at.desc())
+
+                # 🔐 安全过滤：如果提供了service_instance_id，则只返回该服务的任务
+                if service_instance_id is not None:
+                    statement = statement.where(TrainingTaskDB.service_instance_id == service_instance_id)
+                else:
+                    # 记录不安全的调用
+                    logger.warning("get_all_training_tasks() 被调用但没有service_instance_id过滤，可能存在数据泄露风险！")
+
+                statement = statement.limit(limit).offset(offset)
                 results = session.exec(statement).all()
                 # 分离所有对象
                 for result in results:
                     session.expunge(result)
                 return list(results)
         except Exception as e:
-            print(f"获取所有训练任务失败: {e}")
+            print(f"获取训练任务失败: {e}")
             return []
     
     def get_latest_training_task(self) -> Optional[TrainingTaskDB]:
@@ -138,13 +183,30 @@ class TrainingTaskService:
             print(f"获取最新训练任务失败: {e}")
             return None
     
-    def get_training_tasks_by_status(self, status: str) -> List[TrainingTaskDB]:
-        """根据状态获取训练任务"""
+    def get_training_tasks_by_status(self, status: str, service_instance_id: Optional[str] = None) -> List[TrainingTaskDB]:
+        """根据状态获取训练任务（建议指定service_instance_id）
+
+        Args:
+            status: 任务状态
+            service_instance_id: 服务实例ID，如果为None则返回所有服务的任务（不推荐）
+
+        Warning:
+            不传service_instance_id参数可能导致跨服务实例数据泄露！
+        """
         try:
             with safe_get_session() as session:
-                statement = select(TrainingTaskDB).where(TrainingTaskDB.status == status).order_by(TrainingTaskDB.created_at.desc())
+                statement = select(TrainingTaskDB).where(TrainingTaskDB.status == status)
+
+                # 🔐 安全过滤：如果提供了service_instance_id，则只返回该服务的任务
+                if service_instance_id is not None:
+                    statement = statement.where(TrainingTaskDB.service_instance_id == service_instance_id)
+                else:
+                    # 记录不安全的调用
+                    logger.warning(f"get_training_tasks_by_status({status}) 被调用但没有service_instance_id过滤，可能存在数据泄露风险！")
+
+                statement = statement.order_by(TrainingTaskDB.created_at.desc())
                 results = session.exec(statement).all()
-                
+
                 # 分离所有对象
                 for result in results:
                     session.expunge(result)
@@ -153,11 +215,28 @@ class TrainingTaskService:
             print(f"根据状态获取训练任务失败: {e}")
             return []
     
-    def get_training_tasks_by_type(self, train_type: str) -> List[TrainingTaskDB]:
-        """根据训练类型获取训练任务"""
+    def get_training_tasks_by_type(self, train_type: str, service_instance_id: Optional[str] = None) -> List[TrainingTaskDB]:
+        """根据训练类型获取训练任务（建议指定service_instance_id）
+
+        Args:
+            train_type: 训练类型
+            service_instance_id: 服务实例ID，如果为None则返回所有服务的任务（不推荐）
+
+        Warning:
+            不传service_instance_id参数可能导致跨服务实例数据泄露！
+        """
         try:
             with safe_get_session() as session:
-                statement = select(TrainingTaskDB).where(TrainingTaskDB.train_type == train_type).order_by(TrainingTaskDB.created_at.desc())
+                statement = select(TrainingTaskDB).where(TrainingTaskDB.train_type == train_type)
+
+                # 🔐 安全过滤：如果提供了service_instance_id，则只返回该服务的任务
+                if service_instance_id is not None:
+                    statement = statement.where(TrainingTaskDB.service_instance_id == service_instance_id)
+                else:
+                    # 记录不安全的调用
+                    logger.warning(f"get_training_tasks_by_type({train_type}) 被调用但没有service_instance_id过滤，可能存在数据泄露风险！")
+
+                statement = statement.order_by(TrainingTaskDB.created_at.desc())
                 results = session.exec(statement).all()
                 # 分离所有对象
                 for result in results:
@@ -191,7 +270,9 @@ class TrainingTaskService:
                 session.commit()
                 return True
         except Exception as e:
-            print(f"更新训练任务状态失败: {e}")
+            logger.error(f"更新训练任务状态失败: {e}")
+            import traceback
+            logger.error(f"详细错误信息: {traceback.format_exc()}")
             return False
     
     def update_task_result(self, task_id: str, final_model_path: str = None, error_message: str = None, embedding_dim: int = None, loss_data: str = None) -> bool:
@@ -232,32 +313,63 @@ class TrainingTaskService:
             print(f"删除训练任务失败: {e}")
             return False
     
-    def get_task_count(self) -> int:
-        """获取任务总数"""
+    def get_task_count(self, service_instance_id: Optional[str] = None) -> int:
+        """获取任务总数（建议指定service_instance_id）
+
+        Args:
+            service_instance_id: 服务实例ID，如果为None则统计所有服务的任务（不推荐）
+
+        Warning:
+            不传service_instance_id参数可能导致跨服务实例数据泄露！
+        """
         try:
             with safe_get_session() as session:
                 statement = select(TrainingTaskDB)
+
+                # 🔐 安全过滤：如果提供了service_instance_id，则只统计该服务的任务
+                if service_instance_id is not None:
+                    statement = statement.where(TrainingTaskDB.service_instance_id == service_instance_id)
+                else:
+                    # 记录不安全的调用
+                    logger.warning("get_task_count() 被调用但没有service_instance_id过滤，可能存在数据泄露风险！")
+
                 results = session.exec(statement).all()
                 return len(results)
         except Exception as e:
             print(f"获取任务总数失败: {e}")
             return 0
     
-    def get_task_stats(self) -> Dict[str, Any]:
-        """获取任务统计信息"""
+    def get_task_stats(self, service_instance_id: Optional[str] = None) -> Dict[str, Any]:
+        """获取任务统计信息（建议指定service_instance_id）
+
+        Args:
+            service_instance_id: 服务实例ID，如果为None则统计所有服务的任务（不推荐）
+
+        Warning:
+            不传service_instance_id参数可能导致跨服务实例数据泄露！
+        """
         try:
             with safe_get_session() as session:
+                base_statement = select(TrainingTaskDB)
+
+                # 🔐 安全过滤：如果提供了service_instance_id，则只统计该服务的任务
+                if service_instance_id is not None:
+                    base_statement = base_statement.where(TrainingTaskDB.service_instance_id == service_instance_id)
+                else:
+                    # 记录不安全的调用
+                    logger.warning("get_task_stats() 被调用但没有service_instance_id过滤，可能存在数据泄露风险！")
+
                 # 统计各状态的任务数量（兼容大小写）
-                pending_count = len(session.exec(select(TrainingTaskDB).where(TrainingTaskDB.status.in_(["PENDING", "pending"]))).all())
-                running_count = len(session.exec(select(TrainingTaskDB).where(TrainingTaskDB.status.in_(["RUNNING", "running", "training"]))).all())
-                succeeded_count = len(session.exec(select(TrainingTaskDB).where(TrainingTaskDB.status.in_(["SUCCEEDED", "succeeded", "finished"]))).all())
-                stopped_count = len(session.exec(select(TrainingTaskDB).where(TrainingTaskDB.status.in_(["STOPPED", "stopped"]))).all())
-                failed_count = len(session.exec(select(TrainingTaskDB).where(TrainingTaskDB.status.in_(["FAILED", "failed"]))).all())
-                
+                pending_count = len(session.exec(base_statement.where(TrainingTaskDB.status.in_(["PENDING", "pending"]))).all())
+                running_count = len(session.exec(base_statement.where(TrainingTaskDB.status.in_(["RUNNING", "running", "training"]))).all())
+                succeeded_count = len(session.exec(base_statement.where(TrainingTaskDB.status.in_(["SUCCEEDED", "succeeded", "finished"]))).all())
+                stopped_count = len(session.exec(base_statement.where(TrainingTaskDB.status.in_(["STOPPED", "stopped"]))).all())
+                failed_count = len(session.exec(base_statement.where(TrainingTaskDB.status.in_(["FAILED", "failed"]))).all())
+
                 # 统计各类型的任务数量
-                embedding_count = len(session.exec(select(TrainingTaskDB).where(TrainingTaskDB.train_type == "embedding")).all())
-                reranker_count = len(session.exec(select(TrainingTaskDB).where(TrainingTaskDB.train_type == "reranker")).all())
-                
+                embedding_count = len(session.exec(base_statement.where(TrainingTaskDB.train_type == "embedding")).all())
+                reranker_count = len(session.exec(base_statement.where(TrainingTaskDB.train_type == "reranker")).all())
+
                 return {
                     "total": pending_count + running_count + succeeded_count + stopped_count + failed_count,
                     "by_status": {
@@ -270,7 +382,8 @@ class TrainingTaskService:
                     "by_type": {
                         "embedding": embedding_count,
                         "reranker": reranker_count
-                    }
+                    },
+                    "service_instance_id": service_instance_id  # 标记统计的服务范围
                 }
         except Exception as e:
             print(f"获取任务统计信息失败: {e}")
@@ -309,7 +422,7 @@ class TrainingTaskService:
     def update_process_info(self, task_id: str, process_pid: Optional[int], 
                            process_status: Optional[str] = None, service_instance_id: Optional[str] = None) -> bool:
         """更新任务的进程信息（统一接口，支持单进程和多进程训练）"""
-        logger.info(f"🔧 开始更新进程信息: task_id={task_id}, process_pid={process_pid}, process_status={process_status}")
+        logger.info(f"开始更新进程信息: task_id={task_id}, process_pid={process_pid}, process_status={process_status}")
         
         with safe_get_session() as session:
             task = session.get(TrainingTaskDB, task_id)
@@ -317,25 +430,25 @@ class TrainingTaskService:
                 logger.error(f"❌ 任务不存在: {task_id}")
                 return False
             
-            logger.info(f"🔍 找到任务: {task_id}, 当前PID: {task.process_pid}")
+            logger.info(f"找到任务: {task_id}, 当前PID: {task.process_pid}")
             
             if process_pid is not None:
                 old_pid = task.process_pid
                 task.process_pid = process_pid
-                logger.info(f"🔧 更新PID: {old_pid} -> {process_pid}")
+                logger.info(f"更新PID: {old_pid} -> {process_pid}")
                 
             if process_status is not None:
-                # 🔧 统一使用枚举值，确保类型一致性
+                # 统一使用枚举值，确保类型一致性
                 from bubble_rag.training.model_sft.enums import ProcessStatus
                 if isinstance(process_status, str):
                     task.process_status = ProcessStatus(process_status)
                 else:
                     task.process_status = process_status
-                logger.info(f"🔧 更新进程状态: {process_status}")
+                logger.info(f"更新进程状态: {process_status}")
                 
             if service_instance_id is not None:
                 task.service_instance_id = service_instance_id
-                logger.info(f"🔧 更新服务实例ID: {service_instance_id}")
+                logger.info(f"更新服务实例ID: {service_instance_id}")
                 
             task.updated_at = datetime.now()
             session.commit()
@@ -434,6 +547,314 @@ class TrainingTaskService:
                 status_count[status] = status_count.get(status, 0) + 1
                 
             return status_count
+
+    @with_error_handling(context="database", default_return=False)
+    def record_service_startup_time(self, service_instance_id: str, startup_time: datetime) -> bool:
+        """记录服务实例启动时间到数据库"""
+        with safe_get_session() as session:
+            # 查找最新的任务，更新启动时间（如果没有任务，就不记录）
+            statement = select(TrainingTaskDB).where(
+                TrainingTaskDB.service_instance_id == service_instance_id
+            ).order_by(TrainingTaskDB.created_at.desc()).limit(1)
+
+            latest_task = session.exec(statement).first()
+            if latest_task:
+                # 更新现有任务的启动时间
+                latest_task.service_startup_time = startup_time
+                latest_task.updated_at = datetime.now()
+                session.add(latest_task)
+                session.commit()
+                logger.info(f"记录服务启动时间到任务 {latest_task.task_id}: {startup_time}")
+                return True
+            else:
+                logger.warning(f"服务实例 {service_instance_id} 没有任务记录，无法记录启动时间")
+                return False
+
+    @with_error_handling(context="database", default_return=None)
+    def get_service_startup_time(self, service_instance_id: str) -> Optional[datetime]:
+        """获取服务实例启动时间"""
+        with safe_get_session() as session:
+            # 查找该服务实例的任务中记录的启动时间
+            statement = select(TrainingTaskDB.service_startup_time).where(
+                TrainingTaskDB.service_instance_id == service_instance_id,
+                TrainingTaskDB.service_startup_time.isnot(None)
+            ).order_by(TrainingTaskDB.created_at.desc()).limit(1)
+
+            result = session.exec(statement).first()
+            if result:
+                logger.debug(f"获取到服务实例 {service_instance_id} 启动时间: {result}")
+                return result
+            else:
+                logger.warning(f"未找到服务实例 {service_instance_id} 的启动时间记录")
+                return None
+
+    # ==================== 分层隔离方案 ====================
+
+    # ========== 底层：纯服务隔离方法（技术层面） ==========
+    # 用于孤儿进程检测、服务故障恢复、资源清理等技术功能
+
+    @with_error_handling(context="database", default_return=[])
+    def get_tasks_by_service_technical(self, service_instance_id: str, limit: int = 100, offset: int = 0) -> List[TrainingTaskDB]:
+        """
+        纯服务隔离获取任务（技术层面）
+        用于孤儿进程检测、服务管理等技术功能
+        """
+        with safe_get_session() as session:
+            statement = select(TrainingTaskDB).where(
+                TrainingTaskDB.service_instance_id == service_instance_id
+            ).order_by(TrainingTaskDB.created_at.desc()).limit(limit).offset(offset)
+
+            results = session.exec(statement).all()
+            for result in results:
+                session.expunge(result)
+
+            return list(results)
+
+    @with_error_handling(context="database", default_return=[])
+    def get_running_tasks_by_service_technical(self, service_instance_id: str) -> List[TrainingTaskDB]:
+        """
+        纯服务隔离获取运行中任务（技术层面）
+        用于服务实例的任务监控和管理
+        """
+        with safe_get_session() as session:
+            statement = select(TrainingTaskDB).where(
+                TrainingTaskDB.service_instance_id == service_instance_id,
+                TrainingTaskDB.status.in_(["RUNNING", "PENDING"])
+            ).order_by(TrainingTaskDB.created_at.desc())
+
+            results = session.exec(statement).all()
+            for result in results:
+                session.expunge(result)
+
+            return list(results)
+
+    # ========== 中层：纯用户权限方法（业务层面） ==========
+    # 用于API接口、前端界面的业务权限控制，不关心服务分布
+
+    @with_error_handling(context="database", default_return=[])
+    def get_tasks_for_user_business(self, username: str = None, limit: int = None, offset: int = 0, user_info: dict = None) -> List[Dict[str, Any]]:
+        """
+        纯用户权限获取任务（业务层面）
+        自动应用用户权限过滤，跨所有服务实例
+
+        Args:
+            username: 指定用户名（管理员可以查看任何用户，普通用户只能查看自己）
+            limit: 限制返回数量
+            offset: 偏移量
+            user_info: 用户信息字典（包含username, user_role, is_admin等），如果不传则使用UserManager获取
+
+        Returns:
+            任务字典列表（包含用户信息）
+        """
+        # 优先使用传入的user_info，否则使用UserManager获取默认用户
+        current_user = user_info if user_info else UserManager.validate_and_get_user()
+
+        with safe_get_session() as session:
+            statement = select(TrainingTaskDB).order_by(TrainingTaskDB.created_at.desc())
+
+            # 权限过滤
+            if not current_user.get('is_admin', False):
+                # 普通用户只能看到自己的任务
+                effective_username = current_user.get('username')
+                statement = statement.where(TrainingTaskDB.username == effective_username)
+            elif username:
+                # 管理员指定查看某个用户的任务
+                statement = statement.where(TrainingTaskDB.username == username)
+            # 管理员不指定用户名时，查看所有任务
+
+            if limit is not None:
+                statement = statement.limit(limit).offset(offset)
+            elif offset > 0:
+                statement = statement.offset(offset)
+            results = session.exec(statement).all()
+
+            # 转换为字典并分离会话
+            task_dicts = []
+            for result in results:
+                session.expunge(result)
+                task_dicts.append(self._task_db_to_dict(result))
+
+            return task_dicts
+
+    @with_error_handling(context="database", default_return=[])
+    def get_tasks_by_status_for_user_business(self, status: str, username: str = None) -> List[Dict[str, Any]]:
+        """
+        根据状态获取用户任务（业务层面）
+        自动应用用户权限过滤，跨所有服务实例
+        """
+        current_user = UserManager.validate_and_get_user()
+
+        with safe_get_session() as session:
+            statement = select(TrainingTaskDB).where(
+                TrainingTaskDB.status == self.normalize_status(status)
+            ).order_by(TrainingTaskDB.created_at.desc())
+
+            # 权限过滤
+            if not current_user.get('is_admin', False):
+                # 普通用户只能看到自己的任务
+                effective_username = current_user.get('username')
+                statement = statement.where(TrainingTaskDB.username == effective_username)
+            elif username:
+                # 管理员指定查看某个用户的任务
+                statement = statement.where(TrainingTaskDB.username == username)
+
+            results = session.exec(statement).all()
+
+            # 转换为字典并分离会话
+            task_dicts = []
+            for result in results:
+                session.expunge(result)
+                task_dicts.append(self._task_db_to_dict(result))
+
+            return task_dicts
+
+    @with_error_handling(context="database", default_return=False)
+    def can_user_access_task_business(self, task_id: str) -> bool:
+        """
+        检查当前用户是否可以访问任务（业务层面）
+        自动应用用户权限检查，不关心服务归属
+        """
+        with safe_get_session() as session:
+            task = session.get(TrainingTaskDB, task_id)
+            if not task:
+                return False
+
+            return UserManager._can_access_task(task.username)
+
+    @with_error_handling(context="database", default_return=0)
+    def get_task_count_for_user_business(self, username: str = None) -> int:
+        """
+        获取用户任务总数（业务层面）
+        自动应用用户权限过滤，跨所有服务实例
+        """
+        current_user = UserManager.validate_and_get_user()
+
+        with safe_get_session() as session:
+            statement = select(TrainingTaskDB)
+
+            # 权限过滤
+            if not current_user.get('is_admin', False):
+                # 普通用户只能看到自己的任务
+                effective_username = current_user.get('username')
+                statement = statement.where(TrainingTaskDB.username == effective_username)
+            elif username:
+                # 管理员指定查看某个用户的任务
+                statement = statement.where(TrainingTaskDB.username == username)
+
+            return len(session.exec(statement).all())
+
+    # ========== 高层：组合方法（特殊管理场景） ==========
+    # 用于高级管理功能，需要同时考虑服务和用户维度
+
+    @with_error_handling(context="database", default_return=[])
+    def get_user_tasks_in_service_admin(self, service_instance_id: str, username: str = None,
+                                       limit: int = 100, offset: int = 0) -> List[Dict[str, Any]]:
+        """
+        管理员专用：获取指定服务实例中的用户任务（组合层面）
+        需要管理员权限，用于高级管理功能
+
+        使用场景：管理员需要查看"服务A中用户B的任务"
+
+        Args:
+            service_instance_id: 服务实例ID
+            username: 用户名（可选）
+            limit: 限制返回数量
+            offset: 偏移量
+
+        Returns:
+            任务字典列表
+        """
+        # 检查管理员权限
+        current_user = UserManager.validate_and_get_user()
+        if not current_user.get('is_admin', False):
+            logger.warning(f"非管理员用户 {current_user.get('username')} 尝试访问组合查询功能")
+            return []
+
+        with safe_get_session() as session:
+            statement = select(TrainingTaskDB).where(
+                TrainingTaskDB.service_instance_id == service_instance_id
+            ).order_by(TrainingTaskDB.created_at.desc())
+
+            # 可选的用户过滤
+            if username:
+                statement = statement.where(TrainingTaskDB.username == username)
+
+            statement = statement.limit(limit).offset(offset)
+            results = session.exec(statement).all()
+
+            # 转换为字典并分离会话
+            task_dicts = []
+            for result in results:
+                session.expunge(result)
+                task_dicts.append(self._task_db_to_dict(result))
+
+            return task_dicts
+
+    @with_error_handling(context="database", default_return=[])
+    def get_restart_tasks_by_base_id(self, base_task_id: str) -> List[TrainingTaskDB]:
+        """
+        根据基础任务ID获取所有重启任务
+        """
+        try:
+            with safe_get_session() as session:
+                statement = select(TrainingTaskDB).where(
+                    TrainingTaskDB.base_task_id == base_task_id
+                ).order_by(TrainingTaskDB.created_at.desc())
+
+                results = session.exec(statement).all()
+
+                # 分离会话以避免懒加载问题
+                restart_tasks = []
+                for result in results:
+                    session.expunge(result)
+                    restart_tasks.append(result)
+
+                return restart_tasks
+
+        except Exception as e:
+            logger.error(f"查询重启任务失败: {e}")
+            return []
+
+    def get_tasks_with_process_pid(self, username: str = None) -> List[TrainingTaskDB]:
+        """
+        获取有process_pid的任务列表（用于跨服务运行任务查询）
+
+        Args:
+            username: 可选的用户名过滤，如果不传则返回所有任务
+
+        Returns:
+            List[TrainingTaskDB]: 有PID的任务列表
+        """
+        try:
+            with safe_get_session() as session:
+                # 构建查询条件
+                conditions = [
+                    TrainingTaskDB.process_pid.isnot(None),  # 有PID
+                    TrainingTaskDB.process_pid > 0  # PID大于0
+                ]
+
+                # 添加用户过滤
+                if username:
+                    conditions.append(TrainingTaskDB.username == username)
+
+                statement = select(TrainingTaskDB).where(*conditions).order_by(
+                    TrainingTaskDB.started_at.desc()
+                )
+
+                results = session.exec(statement).all()
+
+                # 分离会话以避免懒加载问题
+                tasks_with_pid = []
+                for result in results:
+                    session.expunge(result)
+                    tasks_with_pid.append(result)
+
+                logger.debug(f"查询到 {len(tasks_with_pid)} 个有PID的任务，用户过滤: {username}")
+                return tasks_with_pid
+
+        except Exception as e:
+            logger.error(f"查询有PID的任务失败: {e}")
+            return []
 
 
 # 全局训练任务服务实例

@@ -1,5 +1,8 @@
+import json
+
 from sqlalchemy import CHAR, BigInteger
-from sqlmodel import SQLModel, Field, DateTime, VARCHAR, TEXT, Integer, Column
+from sqlalchemy.dialects.mysql import LONGTEXT
+from sqlmodel import SQLModel, Field, DATETIME, VARCHAR, TEXT, Integer, Column
 from datetime import datetime
 from typing import Optional
 from bubble_rag.utils.snowflake_utils import gen_id
@@ -23,9 +26,9 @@ class DocTask(SQLModel, table=True):
     __table_args__ = {'comment': '文档解析任务'}
 
     id: str = Field(primary_key=True, max_length=32, nullable=False, default_factory=gen_id)
-    file_id: str = Field(max_length=32, sa_column=Column(VARCHAR(32), comment='文件id', nullable=False))
+    file_id: str = Field(max_length=32, sa_column=Column(CHAR(32), comment='文件id', nullable=False))
     doc_knowledge_base_id: str = Field(max_length=32,
-                                       sa_column=Column(VARCHAR(32), comment='所属知识库id', nullable=False))
+                                       sa_column=Column(CHAR(32), comment='所属知识库id', nullable=False))
     total_file: int = Field(default=0, sa_column=Column(Integer, comment='总文件数量', nullable=False))
     remaining_file: int = Field(default=0, sa_column=Column(Integer, comment='剩余文件数量', nullable=False))
     success_file: int = Field(default=0, sa_column=Column(Integer, comment='处理成功文件数量', nullable=False))
@@ -49,6 +52,8 @@ class RagDocuments(SQLModel, table=True):
     doc_knowledge_base_id: str = Field(max_length=32,
                                        sa_column=Column(VARCHAR(32), comment='所属知识库id', nullable=False))
     embedding_model_id: Optional[str] = Field(sa_column=Column(CHAR(32), comment='向量模型id'))
-    doc_version: Optional[int] = Field(default=0, sa_column=Column(BigInteger, comment='版本号', nullable=False))
+    doc_version: Optional[int] = Field(sa_column=Column(BigInteger, comment='版本号', nullable=False),
+                                       default_factory=gen_id)
     create_time: datetime = Field(default_factory=datetime.now, nullable=False)
     update_time: datetime = Field(default_factory=datetime.now, nullable=False)
+

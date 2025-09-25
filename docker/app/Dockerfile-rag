@@ -39,6 +39,11 @@ RUN wget https://laiye-public-oss.oss-cn-beijing.aliyuncs.com/bubble_rag/nltk_da
     tar -xzf nltk_data.tar.gz && \
     rm nltk_data.tar.gz
 
+# 下载并解压 stopwords 数据
+RUN wget https://laiye-public-oss.oss-cn-beijing.aliyuncs.com/bubble_rag/stopwords.tar.gz && \
+    tar -xzf stopwords.tar.gz && \
+    rm stopwords.tar.gz
+
 # 暴露端口
 EXPOSE ${SERVER_PORT}
 

@@ -1,4 +1,4 @@
-from sqlalchemy import CHAR
+from sqlalchemy import CHAR, Integer
 
 from bubble_rag.entity.relational.models import ModelConfig
 from sqlmodel import SQLModel, Field, VARCHAR, TEXT, Column, Relationship

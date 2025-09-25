@@ -53,6 +53,9 @@ class SwanLabConfig:
         if self.should_use_local_mode:
             logger.info("SwanLab使用本地模式")
             os.environ["SWANLAB_MODE"] = "local"
+            # 确保本地模式优先级
+            if "SWANLAB_API_KEY" in os.environ:
+                del os.environ["SWANLAB_API_KEY"]
         elif self.api_key:
             # 确保环境变量设置正确
             os.environ["SWANLAB_API_KEY"] = self.api_key
@@ -93,7 +96,11 @@ class SwanLabConfig:
                 init_kwargs["workspace"] = self.workspace
             if self.experiment_name:
                 init_kwargs["experiment_name"] = self.experiment_name
-                
+
+            # 强制本地模式如果没有API密钥
+            if self.should_use_local_mode:
+                init_kwargs["mode"] = "local"
+
             swanlab.init(**init_kwargs)
             logger.info(f"SwanLab实验初始化成功: {init_kwargs}")
         except Exception as e:

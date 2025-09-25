@@ -19,6 +19,7 @@ class ServiceInstanceManager:
         self._instance_id: Optional[str] = None
         self._port_detected: bool = False  # 端口检测成功标记
         self._detection_attempted: bool = False
+        self._startup_time: Optional[float] = None  # 服务启动时间
     
     def get_service_instance_id(self) -> Optional[str]:
         """获取唯一的服务实例标识，如果端口未检测到则持续尝试"""
@@ -106,16 +107,25 @@ class ServiceInstanceManager:
         self._try_update_with_port()
         return self._port_detected
     
+    def set_startup_time(self, startup_time: float):
+        """设置服务启动时间"""
+        self._startup_time = startup_time
+        logger.info(f"记录服务启动时间: {startup_time}")
+
+    def get_startup_time(self) -> Optional[float]:
+        """获取服务启动时间"""
+        return self._startup_time
+
     def get_instance_info(self) -> dict:
         """获取实例详细信息"""
         instance_id = self.get_service_instance_id()
         parts = instance_id.split('_') if instance_id else []
         config_port = self._get_port_from_config()
-        
+
         try:
             hostname = parts[0] if len(parts) > 0 else socket.gethostname()
             port = int(parts[1]) if len(parts) > 1 else config_port
-            
+
             return {
                 "instance_id": instance_id,
                 "hostname": hostname,
@@ -125,6 +135,7 @@ class ServiceInstanceManager:
                 "config_port": config_port,  # 配置文件端口
                 "port_detected": self._port_detected,  # 端口获取状态
                 "detection_attempted": self._detection_attempted,  # 检测尝试状态
+                "startup_time": self._startup_time,  # 服务启动时间
                 "format": "hostname_port"  # 格式标识
             }
         except (ValueError, IndexError):

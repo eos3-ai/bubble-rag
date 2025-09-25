@@ -1,11 +1,13 @@
 import logging
 import copy
+import traceback
 import datrie
 import math
 import os
 import re
 import string
 from hanziconv import HanziConv
+from loguru import logger
 from nltk import word_tokenize
 from nltk.stem import PorterStemmer, WordNetLemmatizer
 from bubble_rag.utils.file_utils import get_project_base_directory
@@ -200,7 +202,7 @@ class RagTokenizer:
             F += freq
             L += 0 if len(tk) < 2 else 1
             tks.append(tk)
-        #F /= len(tks)
+        # F /= len(tks)
         L /= len(tks)
         logging.debug("[SC] {} {} {} {} {}".format(tks, len(tks), L, F, B / len(tks) + L + F))
         return tks, B / len(tks) + L + F
@@ -310,7 +312,7 @@ class RagTokenizer:
 
         arr = self._split_by_lang(line)
         res = []
-        for L,lang in arr:
+        for L, lang in arr:
             if not lang:
                 res.extend([self.stemmer.stem(self.lemmatizer.lemmatize(t)) for t in word_tokenize(L)])
                 continue
@@ -448,6 +450,7 @@ def naiveQie(txt):
     return tks
 
 
+# 使用示例函数
 tokenizer = RagTokenizer()
 tokenize = tokenizer.tokenize
 fine_grained_tokenize = tokenizer.fine_grained_tokenize
@@ -457,4 +460,3 @@ loadUserDict = tokenizer.loadUserDict
 addUserDict = tokenizer.addUserDict
 tradi2simp = tokenizer._tradi2simp
 strQ2B = tokenizer._strQ2B
-

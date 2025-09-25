@@ -338,5 +338,165 @@
             INSERT INTO docker_server (id, server_name, srv_base_url, create_time, update_time) VALUES ('142506654540234766', 'local-docker', 'unix:///var/run/docker.sock', now(), now())
         </sql>
     </changeSet>
-    
+
+    <!-- ChangeSet 11: Add service_startup_time field to training_tasks table -->
+    <changeSet id="add-service-startup-time-field" author="laiye.ai">
+        <addColumn tableName="training_tasks">
+            <column name="service_startup_time" type="datetime">
+                <constraints nullable="true"/>
+            </column>
+        </addColumn>
+        <sql>
+            ALTER TABLE training_tasks MODIFY COLUMN service_startup_time DATETIME NULL COMMENT '服务实例启动时间，用于孤儿进程检测';
+        </sql>
+    </changeSet>
+
+    <!-- ChangeSet 12: Create users table for user management -->
+    <changeSet id="create-users-table" author="laiye.ai">
+        <createTable tableName="users" remarks="用户管理表">
+            <column name="username" type="VARCHAR(64)">
+                <constraints primaryKey="true" nullable="false"/>
+            </column>
+            <column name="user_password" type="VARCHAR(255)" remarks="用户密码哈希值">
+                <constraints nullable="false"/>
+            </column>
+            <column name="user_role" type="VARCHAR(16)" defaultValue="admin" remarks="用户角色：admin=管理员，user=普通用户">
+                <constraints nullable="false"/>
+            </column>
+            <column name="display_name" type="VARCHAR(128)" remarks="显示名称">
+                <constraints nullable="true"/>
+            </column>
+            <column name="created_at" type="DATETIME" defaultValueComputed="CURRENT_TIMESTAMP" remarks="创建时间">
+                <constraints nullable="false"/>
+            </column>
+            <column name="updated_at" type="DATETIME" defaultValueComputed="CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP" remarks="更新时间">
+                <constraints nullable="false"/>
+            </column>
+        </createTable>
+        <sql>ALTER TABLE users ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci</sql>
+    </changeSet>
+
+    <!-- ChangeSet 13: Insert default admin user -->
+    <changeSet id="insert-default-admin-user" author="laiye.ai">
+        <sql>
+            INSERT INTO users (username, user_password, user_role, display_name, created_at, updated_at)
+            VALUES ('admin', SHA2('admin', 256), 'admin', '系统管理员', NOW(), NOW());
+        </sql>
+    </changeSet>
+
+    <!-- ChangeSet 14: Add username field to training_tasks table -->
+    <changeSet id="add-username-field-to-training-tasks" author="laiye.ai">
+        <addColumn tableName="training_tasks">
+            <column name="username" type="VARCHAR(64)" remarks="关联用户名（外键）">
+                <constraints nullable="true"/>
+            </column>
+        </addColumn>
+        <!-- Update existing tasks to use admin user -->
+        <sql>
+            UPDATE training_tasks SET username = 'admin' WHERE username IS NULL;
+        </sql>
+        <!-- Set username as NOT NULL after data migration -->
+        <sql>
+            ALTER TABLE training_tasks MODIFY COLUMN username VARCHAR(64) NOT NULL COMMENT '关联用户名（外键）';
+        </sql>
+        <!-- Add foreign key constraint -->
+        <sql>
+            ALTER TABLE training_tasks
+            ADD CONSTRAINT fk_username
+            FOREIGN KEY (username) REFERENCES users(username)
+            ON UPDATE CASCADE ON DELETE RESTRICT;
+        </sql>
+        <!-- Add index for performance -->
+        <sql>
+            CREATE INDEX idx_username ON training_tasks (username);
+        </sql>
+        <sql>
+            CREATE INDEX idx_user_status ON training_tasks (username, status);
+        </sql>
+    </changeSet>
+
+    <!-- ChangeSet 15: Update training_tasks table comment to reflect user system -->
+    <changeSet id="update-training-tasks-comment" author="laiye.ai">
+        <sql>
+            ALTER TABLE training_tasks COMMENT = '训练任务表V4-用户权限支持';
+        </sql>
+    </changeSet>
+
+    <!-- ChangeSet 16: Add restart relationship fields to training_tasks table -->
+    <changeSet id="add-restart-relationship-fields" author="laiye.ai">
+        <comment>添加重启关系字段，支持训练任务重启功能追踪</comment>
+
+        <!-- Add base_task_id field -->
+        <addColumn tableName="training_tasks">
+            <column name="base_task_id" type="VARCHAR(64)" remarks="重启源任务ID">
+                <constraints nullable="true"/>
+            </column>
+        </addColumn>
+
+        <!-- Add restart_count field -->
+        <addColumn tableName="training_tasks">
+            <column name="restart_count" type="INT" defaultValueNumeric="0" remarks="被重启次数">
+                <constraints nullable="false"/>
+            </column>
+        </addColumn>
+
+        <!-- Add index for base_task_id for efficient restart history queries -->
+        <createIndex indexName="idx_base_task_id" tableName="training_tasks">
+            <column name="base_task_id"/>
+        </createIndex>
+
+        <!-- Add constraint to ensure restart_count is non-negative -->
+        <sql>
+            ALTER TABLE training_tasks
+            ADD CONSTRAINT chk_restart_count_non_negative
+            CHECK (restart_count >= 0);
+        </sql>
+
+        <!-- Update table comment to reflect restart functionality -->
+        <sql>
+            ALTER TABLE training_tasks COMMENT = '训练任务表V5-重启关系支持';
+        </sql>
+    </changeSet>
+
+    <!-- ChangeSet 17: Add restart relationship foreign key constraint (optional) -->
+    <changeSet id="add-restart-self-reference-constraint" author="laiye.ai">
+        <comment>添加重启关系的自引用外键约束（可选，提高数据完整性）</comment>
+
+        <!-- Add foreign key constraint for base_task_id referencing task_id -->
+        <sql>
+            ALTER TABLE training_tasks
+            ADD CONSTRAINT fk_base_task_id
+            FOREIGN KEY (base_task_id) REFERENCES training_tasks(task_id)
+            ON DELETE SET NULL ON UPDATE CASCADE;
+        </sql>
+    </changeSet>
+
+    <!-- ChangeSet 18: Update configured_sample_size constraint to allow -1 -->
+    <changeSet id="update-configured-sample-size-constraint-allow-negative-one" author="laiye.ai">
+        <comment>
+            更新 configured_sample_size 约束，允许 -1 值
+            -1 = 不限制样本数量，0 = 不使用数据集，>0 = 限制样本数量
+        </comment>
+
+        <!-- 删除旧约束 -->
+        <sql>ALTER TABLE dataset_info DROP CONSTRAINT chk_positive_configured_sample_size;</sql>
+
+        <!-- 添加新约束 -->
+        <sql>
+            ALTER TABLE dataset_info
+            ADD CONSTRAINT chk_positive_configured_sample_size
+            CHECK (configured_sample_size >= -1);
+        </sql>
+
+        <!-- 回滚操作 -->
+        <rollback>
+            <sql>ALTER TABLE dataset_info DROP CONSTRAINT chk_positive_configured_sample_size;</sql>
+            <sql>
+                ALTER TABLE dataset_info
+                ADD CONSTRAINT chk_positive_configured_sample_size
+                CHECK (configured_sample_size >= 0);
+            </sql>
+        </rollback>
+    </changeSet>
+
 </databaseChangeLog>

@@ -90,12 +90,18 @@ class UnifiedTrainingService(ProcessManagerBase):
             
             # 保存到数据库（与其他训练服务保持一致）
             try:
+                # 🔐 获取当前用户信息用于权限控制
+                from bubble_rag.utils.user_manager import UserManager
+                current_user = UserManager.validate_and_get_user()
+                username = current_user.get('username', 'admin')
+
                 training_task_service.save_training_task(
-                    task, 
-                    request.training_params, 
-                    service_instance_id=self.service_instance_id
+                    task,
+                    request.training_params,
+                    service_instance_id=self.service_instance_id,
+                    username=username
                 )
-                logger.info(f"任务已保存到数据库: {task.task_id}")
+                logger.info(f"任务已保存到数据库: {task.task_id} (用户: {username})")
             except Exception as db_error:
                 logger.warning(f"保存任务到数据库失败（但任务已创建）: {str(db_error)}")
                 # 不抛出异常，允许任务继续执行，后续状态更新时会再次尝试保存
@@ -184,10 +190,16 @@ class UnifiedTrainingService(ProcessManagerBase):
             
             # 更新数据库中的device字段
             try:
+                # 🔐 获取当前用户信息
+                from bubble_rag.utils.user_manager import UserManager
+                current_user = UserManager.validate_and_get_user()
+                username = current_user.get('username', 'admin')
+
                 training_task_service.save_training_task(
-                    task, 
-                    task.training_params, 
-                    service_instance_id=self.service_instance_id
+                    task,
+                    task.training_params,
+                    service_instance_id=self.service_instance_id,
+                    username=username
                 )
                 logger.info(f"任务device字段已更新到数据库: {task.task_id} -> {allocated_device}")
             except Exception as db_error:
@@ -203,8 +215,8 @@ class UnifiedTrainingService(ProcessManagerBase):
                 "model_name_or_path": task.model_name_or_path,
                 "dataset_name_or_path": task.dataset_name_or_path,
                 "output_dir": task.output_dir,
-                "device": allocated_device,
-                "training_mode": mode
+                "device": allocated_device
+                # 注意：training_mode 不应该加入 training_config，它是服务层控制参数
             })
             
             logger.info(f"传递训练配置参数: {list(training_config.keys())}")
@@ -263,11 +275,11 @@ class UnifiedTrainingService(ProcessManagerBase):
                     'service_instance_id': self.service_instance_id
                 }
             
-            # 进程已启动成功，更新任务状态（即使状态更新失败也不影响整体成功）
+            # 进程已启动成功，保持PENDING状态，等待真正开始训练时再更新为RUNNING
             try:
-                task_manager.start_task(task.task_id)
-                training_task_service.update_task_status(task.task_id, TrainingStatus.RUNNING.value)
-                logger.info(f"✅ 任务状态更新成功: {task.task_id}")
+                # 不调用start_task，让任务保持PENDING状态，等待子进程真正开始训练时才更新为RUNNING
+                training_task_service.update_task_status(task.task_id, TrainingStatus.PENDING.value)
+                logger.info(f"✅ 任务状态更新成功: {task.task_id} (PENDING - 等待训练开始)")
             except Exception as status_error:
                 logger.warning(f"任务状态更新失败（但进程已启动）: {str(status_error)}")
             
@@ -320,9 +332,15 @@ class UnifiedTrainingService(ProcessManagerBase):
             def progress_callback(current_step: int, total_steps: int, stage: str = "training"):
                 """进度回调函数"""
                 try:
+                    # 检测异常的total_steps值（保留作为安全检查）
+                    if total_steps <= 0:
+                        logger.warning(f"🚨 检测到异常的total_steps: {total_steps}, 跳过进度更新")
+                        return
+
                     # 计算进度百分比，但防止过早设置100%
                     if total_steps > 0:
                         raw_progress = (current_step / total_steps) * 100.0
+
                         # 🔧 防止在训练完成前设置100%进度：将99.5%以上的进度限制为99.5%
                         # 只有当训练真正完成时，才会在completion handler中设置100%
                         progress = min(raw_progress, 99.5) if stage.lower() in ["training", "训练中"] else raw_progress
@@ -342,10 +360,10 @@ class UnifiedTrainingService(ProcessManagerBase):
                 except Exception as e:
                     logger.warning(f"更新进度失败: {e}")
             
-            # 导入训练函数
+            # 导入重构后的训练函数
             from ..train import main
-            
-            # 执行训练
+
+            # 执行训练（状态更新将在训练循环真正开始时进行）
             model, save_dir = main(
                 progress_callback=progress_callback,
                 training_config=training_config
@@ -373,14 +391,22 @@ class UnifiedTrainingService(ProcessManagerBase):
             # 🔧 训练成功完成后释放GPU资源
             try:
                 from ..utils.gpu_resource_manager import gpu_resource_manager
-                gpu_resource_manager.release_gpus_for_task(task_id)
-                logger.info(f"✅ 训练成功完成，已释放任务 {task_id} 的GPU资源")
-                
+                success = gpu_resource_manager.release_gpus_for_task(task_id)
+                if success:
+                    logger.info(f"✅ 训练成功完成，已释放任务 {task_id} 的GPU资源")
+                else:
+                    logger.warning(f"常规GPU释放失败，尝试强制释放")
+                    gpu_resource_manager.force_release_gpu_for_task(task_id)
+
                 # 增强GPU清理（静态方法中不能使用self，直接调用GPU资源管理器）
-                # self._enhanced_gpu_cleanup(task_id)  # 注释掉，因为这是静态方法
                 logger.info("GPU资源已通过gpu_resource_manager释放")
             except Exception as gpu_error:
-                logger.warning(f"训练完成后释放GPU资源失败: {gpu_error}")
+                logger.critical(f"❌ 严重错误：训练完成后GPU资源释放失败！尝试强制恢复。任务: {task_id}, 错误: {gpu_error}")
+                try:
+                    gpu_resource_manager.force_release_gpu_for_task(task_id)
+                    logger.warning(f"🔧 强制GPU释放已执行")
+                except Exception as force_error:
+                    logger.critical(f"❌ 强制GPU释放也失败！任务 {task_id} 资源可能永久泄漏: {force_error}")
             
         except Exception as e:
             error_msg = f"训练执行失败: {str(e)}"
@@ -391,10 +417,28 @@ class UnifiedTrainingService(ProcessManagerBase):
                 from ..services.task_manager import task_manager
                 from bubble_rag.training.mysql_service.service.training_task_service import training_task_service
                 from bubble_rag.training.model_sft.enums import TrainingStatus
-                
+
                 task_manager.fail_task(task_id, error_msg, traceback.format_exc())
                 training_task_service.update_task_status(task_id, TrainingStatus.FAILED.value)
                 training_task_service.update_task_result(task_id, error_message=error_msg)
+
+                # 🔧 关键修复：训练失败时也要释放GPU资源
+                try:
+                    from ..utils.gpu_resource_manager import gpu_resource_manager
+                    success = gpu_resource_manager.release_gpus_for_task(task_id)
+                    if success:
+                        logger.info(f"🔓 训练失败，已释放任务 {task_id} 的GPU资源")
+                    else:
+                        logger.warning(f"常规GPU释放失败，尝试强制释放")
+                        gpu_resource_manager.force_release_gpu_for_task(task_id)
+                except Exception as gpu_error:
+                    logger.error(f"❌ 训练失败时释放GPU资源失败: {gpu_error}")
+                    try:
+                        gpu_resource_manager.force_release_gpu_for_task(task_id)
+                        logger.warning(f"🔧 强制GPU释放已执行")
+                    except Exception as force_error:
+                        logger.critical(f"❌ 强制GPU释放也失败！任务 {task_id} 资源可能永久泄漏: {force_error}")
+
             except Exception as update_error:
                 logger.error(f"更新失败状态时出错: {update_error}")
             
@@ -404,14 +448,22 @@ class UnifiedTrainingService(ProcessManagerBase):
             # 无论什么模式都释放GPU资源（作为最终保险）
             try:
                 from ..utils.gpu_resource_manager import gpu_resource_manager
-                gpu_resource_manager.release_gpus_for_task(task_id)
-                logger.info(f"🔧 Finally块：确保释放任务 {task_id} 的GPU资源")
-                
+                success = gpu_resource_manager.release_gpus_for_task(task_id)
+                if success:
+                    logger.info(f"🔧 Finally块：确保释放任务 {task_id} 的GPU资源")
+                else:
+                    logger.warning(f"Finally块：常规GPU释放失败，尝试强制释放")
+                    gpu_resource_manager.force_release_gpu_for_task(task_id)
+
                 # 增强GPU清理（最终保险）- 静态方法中不能使用self
-                # self._enhanced_gpu_cleanup(task_id)  # 注释掉，因为这是静态方法
                 logger.info("Finally块：GPU资源已通过gpu_resource_manager释放")
             except Exception as e:
-                logger.warning(f"Finally块GPU资源释放失败: {e}")
+                logger.critical(f"❌ 严重错误：Finally块GPU资源释放失败！尝试强制恢复。任务: {task_id}, 错误: {e}")
+                try:
+                    gpu_resource_manager.force_release_gpu_for_task(task_id)
+                    logger.warning(f"🔧 强制GPU释放已执行")
+                except Exception as force_error:
+                    logger.critical(f"❌ 强制GPU释放也失败！任务 {task_id} 资源可能永久泄漏: {force_error}")
     
     def stop_training(self, task_id: str) -> bool:
         """
@@ -432,8 +484,18 @@ class UnifiedTrainingService(ProcessManagerBase):
                     return self._stop_training_by_database(task_id)
                 
                 if not process.is_alive():
-                    logger.info(f"任务 {task_id} 进程已结束")
+                    logger.info(f"任务 {task_id} 进程已结束，仍需清理GPU资源")
                     self.training_processes.pop(task_id, None)
+
+                    # 🔧 即使进程已结束，也要清理GPU资源
+                    task_manager.cancel_task(task_id)
+                    training_task_service.update_task_status(task_id, TrainingStatus.STOPPED.value)
+
+                    # 清理GPU资源
+                    success = self._enhanced_gpu_cleanup(task_id)
+                    if not success:
+                        logger.warning(f"进程已结束但GPU清理失败: {task_id}")
+
                     return True
                 
                 # 🌳 使用统一的进程树终止方法
@@ -483,8 +545,10 @@ class UnifiedTrainingService(ProcessManagerBase):
                     logger.warning(f"更新进程状态失败: {update_error}")
                 
                 # 🔧 增强GPU资源清理
-                self._enhanced_gpu_cleanup(task_id)
-                
+                success = self._enhanced_gpu_cleanup(task_id)
+                if not success:
+                    logger.warning(f"增强GPU清理失败，建议检查GPU状态")
+
                 logger.info(f"✅ 已停止训练任务: {task_id}")
                 return True
                 
@@ -508,13 +572,19 @@ class UnifiedTrainingService(ProcessManagerBase):
             
             # 检查是否有PID记录
             if not task_db.process_pid:
-                logger.warning(f"任务 {task_id} 没有PID记录")
+                logger.warning(f"任务 {task_id} 没有PID记录，直接清理状态和GPU资源")
                 # 直接更新状态为停止
                 task_manager.cancel_task(task_id)
                 training_task_service.update_task_status(task_id, TrainingStatus.STOPPED.value)
                 # 🔧 更新进程状态
                 from ..enums.training_task_enums import ProcessStatus
                 training_task_service.update_process_info(task_id, None, ProcessStatus.STOPPED.value)
+
+                # 🔧 清理GPU资源
+                success = self._enhanced_gpu_cleanup(task_id)
+                if not success:
+                    logger.warning(f"无PID任务GPU清理失败: {task_id}")
+
                 return True
             
             pid = task_db.process_pid
@@ -522,12 +592,18 @@ class UnifiedTrainingService(ProcessManagerBase):
             
             # 检查进程是否存在
             if not psutil.pid_exists(pid):
-                logger.info(f"进程 {pid} 已不存在，更新任务状态")
+                logger.info(f"进程 {pid} 已不存在，更新任务状态并清理GPU资源")
                 task_manager.cancel_task(task_id)
                 training_task_service.update_task_status(task_id, TrainingStatus.STOPPED.value)
                 # 🔧 更新进程状态
                 from ..enums.training_task_enums import ProcessStatus
                 training_task_service.update_process_info(task_id, None, ProcessStatus.STOPPED.value)
+
+                # 🔧 清理GPU资源
+                success = self._enhanced_gpu_cleanup(task_id)
+                if not success:
+                    logger.warning(f"已结束进程GPU清理失败: {task_id}")
+
                 return True
             
             # 获取进程对象并停止
@@ -556,8 +632,10 @@ class UnifiedTrainingService(ProcessManagerBase):
                 training_task_service.update_process_info(task_id, None, ProcessStatus.STOPPED.value)
                 
                 # 🔧 增强GPU资源清理
-                self._enhanced_gpu_cleanup(task_id)
-                
+                gpu_success = self._enhanced_gpu_cleanup(task_id)
+                if not gpu_success:
+                    logger.warning(f"增强GPU清理失败，建议检查GPU状态")
+
                 if success:
                     logger.info(f"✅ 进程树已通过统一方法成功终止: PID {pid}")
                     return True
@@ -566,12 +644,18 @@ class UnifiedTrainingService(ProcessManagerBase):
                     return False
                 
             except psutil.NoSuchProcess:
-                logger.info(f"进程 {pid} 已结束，更新任务状态")
+                logger.info(f"进程 {pid} 已结束，更新任务状态并清理GPU资源")
                 task_manager.cancel_task(task_id)
                 training_task_service.update_task_status(task_id, TrainingStatus.STOPPED.value)
                 # 🔧 更新进程状态
                 from ..enums.training_task_enums import ProcessStatus
                 training_task_service.update_process_info(task_id, None, ProcessStatus.STOPPED.value)
+
+                # 🔧 清理GPU资源
+                success = self._enhanced_gpu_cleanup(task_id)
+                if not success:
+                    logger.warning(f"NoSuchProcess异常GPU清理失败: {task_id}")
+
                 return True
             except psutil.AccessDenied:
                 logger.error(f"无权限访问进程 {pid}")
@@ -603,6 +687,17 @@ class UnifiedTrainingService(ProcessManagerBase):
                     if task_id in self.process_info:
                         from ..enums.training_task_enums import ProcessStatus
                         self.process_info[task_id]['status'] = ProcessStatus.STOPPED.value
+
+                    # 🔧 关键修复：清理进程时同时释放GPU资源
+                    try:
+                        from ..utils.gpu_resource_manager import gpu_resource_manager
+                        if gpu_resource_manager.release_gpus_for_task(task_id):
+                            logger.info(f"✅ 进程清理时释放任务 {task_id} 的GPU资源")
+                        else:
+                            logger.warning(f"⚠️ 进程清理时GPU释放失败，尝试强制释放: {task_id}")
+                            gpu_resource_manager.force_release_gpu_for_task(task_id)
+                    except Exception as gpu_e:
+                        logger.error(f"❌ 进程清理时GPU资源释放失败: {task_id}, 错误: {gpu_e}")
             
             return running
     
@@ -659,9 +754,16 @@ class UnifiedTrainingService(ProcessManagerBase):
                     logger.info(f"🔍 进程监控：检测到任务 {task_id} 完成，已释放GPU资源")
                     
                     # 增强GPU清理
-                    self._enhanced_gpu_cleanup(task_id)
+                    gpu_success = self._enhanced_gpu_cleanup(task_id)
+                    if not gpu_success:
+                        logger.warning(f"进程监控：增强GPU清理失败")
                 except Exception as gpu_error:
-                    logger.warning(f"进程监控GPU清理失败: {gpu_error}")
+                    logger.error(f"❌ 进程监控GPU清理失败，尝试强制恢复。任务: {task_id}, 错误: {gpu_error}")
+                    try:
+                        gpu_resource_manager.force_release_gpu_for_task(task_id)
+                        logger.warning(f"🔧 强制GPU释放已执行")
+                    except Exception as force_error:
+                        logger.critical(f"❌ 强制GPU释放也失败！任务 {task_id} 资源可能永久泄漏: {force_error}")
                 
                 # 更新数据库中的进程状态
                 try:
@@ -758,16 +860,52 @@ class UnifiedTrainingService(ProcessManagerBase):
                                     logger.info(f"✅ 进程树清理成功: PID={pid}")
                                 else:
                                     logger.warning(f"⚠️ 进程树清理失败，但继续删除流程: PID={pid}")
-                                    
+
+                                # 🔧 关键修复：删除任务时也要确保GPU资源释放
+                                logger.info(f"🔧 删除任务：强制清理GPU资源 {task_id}")
+                                gpu_success = self._enhanced_gpu_cleanup(task_id)
+                                if not gpu_success:
+                                    logger.warning(f"删除任务时GPU清理失败，建议检查GPU状态")
+
                             except psutil.NoSuchProcess:
                                 logger.info(f"进程已不存在: PID={pid}")
+                                # 进程不存在时也要清理GPU资源
+                                logger.info(f"🔧 进程已不存在，清理GPU资源 {task_id}")
+                                self._enhanced_gpu_cleanup(task_id)
                             except Exception as e:
                                 logger.warning(f"杀死进程失败: PID={pid}, 错误={e}")
+                                # 进程清理失败时也要尝试清理GPU资源
+                                logger.info(f"🔧 进程清理失败，强制清理GPU资源 {task_id}")
+                                self._enhanced_gpu_cleanup(task_id)
                     except Exception as e:
                         logger.warning(f"处理运行进程失败: {e}")
-                    
+                        # 异常情况下也要尝试清理GPU资源
+                        logger.info(f"🔧 异常情况，强制清理GPU资源 {task_id}")
+                        try:
+                            self._enhanced_gpu_cleanup(task_id)
+                        except Exception as gpu_error:
+                            logger.error(f"异常情况下GPU清理失败: {gpu_error}")
+
                     # 从运行进程列表中移除
                     self.processes.pop(task_id, None)
+
+            # 🔧 额外保险：通过进程名查找并清理可能遗漏的进程
+            logger.info(f"🔧 删除任务：通过进程名检查遗漏的训练进程 {task_id}")
+            try:
+                self._cleanup_processes_by_name(task_id)
+            except Exception as cleanup_error:
+                logger.warning(f"通过进程名清理失败: {cleanup_error}")
+
+            # 🔧 额外保险：无论前面的清理是否成功，都再次尝试GPU清理
+            logger.info(f"🔧 删除任务最终保险：确保GPU资源清理 {task_id}")
+            try:
+                final_gpu_success = self._enhanced_gpu_cleanup(task_id)
+                if final_gpu_success:
+                    logger.info(f"✅ 删除任务GPU清理最终确认成功: {task_id}")
+                else:
+                    logger.warning(f"⚠️ 删除任务GPU清理最终确认失败: {task_id}")
+            except Exception as final_gpu_error:
+                logger.error(f"删除任务GPU清理最终确认异常: {final_gpu_error}")
             
             # 3. 从内存中删除任务
             if memory_task:
@@ -798,13 +936,26 @@ class UnifiedTrainingService(ProcessManagerBase):
                 process_status=ProcessStatus.TERMINATED.value
             )
             
-            # 5. 从数据库中删除任务记录
+            # 5. 删除关联的数据集记录
+            logger.info(f"🗂️ 删除关联数据集: {task_id}")
+            dataset_deleted_count = 0
+            dataset_message = ""
+            try:
+                from bubble_rag.training.mysql_service.service.training_dataset_service import training_dataset_service
+                dataset_deleted_count, dataset_message = training_dataset_service.delete_datasets_by_task(task_id)
+                logger.info(f"📊 数据集删除结果: {dataset_message}")
+            except Exception as e:
+                logger.warning(f"删除数据集失败，但继续删除任务: {e}")
+                dataset_message = f"数据集删除失败: {str(e)}"
+
+            # 6. 从数据库中删除任务记录
             logger.info(f"🗄️ 从数据库删除任务记录: {task_id}")
             db_success = training_task_service.delete_training_task(task_id)
-            
+
             if db_success:
-                logger.info(f"✅ 任务删除成功: {task_id}")
-                return True, f"任务 {task_id} 已成功删除"
+                dataset_info = f"，同时删除了 {dataset_deleted_count} 个数据集记录" if dataset_deleted_count > 0 else ""
+                logger.info(f"✅ 任务删除成功: {task_id}{dataset_info}")
+                return True, f"任务 {task_id} 已成功删除{dataset_info}"
             else:
                 logger.error(f"❌ 数据库删除失败: {task_id}")
                 return False, "从数据库删除任务失败"
@@ -894,17 +1045,31 @@ class UnifiedTrainingService(ProcessManagerBase):
             logger.error(f"终止进程树失败 PID={pid}: {e}")
             return False
 
-    def _enhanced_gpu_cleanup(self, task_id: str):
+    def _enhanced_gpu_cleanup(self, task_id: str) -> bool:
         """
         增强GPU资源清理机制
         不仅释放GPU资源管理器中的分配，还清理可能残留的GPU内存
+
+        Returns:
+            bool: True if successful, False if failed
         """
+        success = True
         try:
             # 1. 释放GPU资源管理器分配
-            gpu_resource_manager.release_gpus_for_task(task_id)
-            logger.info(f"🔧 已释放GPU资源管理器中的任务 {task_id} 资源")
+            release_success = gpu_resource_manager.release_gpus_for_task(task_id)
+            if release_success:
+                logger.info(f"🔧 已释放GPU资源管理器中的任务 {task_id} 资源")
+            else:
+                logger.warning(f"GPU资源管理器释放失败，尝试强制释放")
+                success = gpu_resource_manager.force_release_gpu_for_task(task_id)
         except Exception as e:
-            logger.warning(f"释放GPU资源管理器资源失败: {e}")
+            logger.error(f"❌ GPU资源管理器资源释放失败，尝试强制恢复。错误: {e}")
+            try:
+                success = gpu_resource_manager.force_release_gpu_for_task(task_id)
+                logger.warning(f"🔧 强制GPU释放已执行")
+            except Exception as force_error:
+                logger.critical(f"❌ 强制GPU释放也失败！任务 {task_id} 资源可能永久泄漏: {force_error}")
+                success = False
         
         try:
             # 2. 强制清理CUDA内存（如果可用）
@@ -957,6 +1122,128 @@ class UnifiedTrainingService(ProcessManagerBase):
             logger.debug(f"系统级GPU检查失败: {e}")
         
         logger.info(f"✅ GPU资源清理完成: 任务 {task_id}")
+        return success
+
+    def _cleanup_processes_by_name(self, task_id: str) -> bool:
+        """
+        通过进程名和命令行查找并清理可能遗漏的训练进程
+        这是一个补充清理机制，用于捕获PID-based清理可能遗漏的进程
+
+        Args:
+            task_id: 任务ID
+
+        Returns:
+            bool: True if successful cleanup, False if issues found
+        """
+        try:
+            import psutil
+            import re
+            import os
+
+            logger.info(f"🔍 开始按进程名清理遗漏的训练进程: {task_id}")
+
+            # 定义可能的训练进程名称模式
+            training_patterns = [
+                r'python.*train.*',
+                r'.*accelerate.*',
+                r'.*torch.*distributed.*',
+                r'.*deepspeed.*',
+                r'.*transformers.*',
+                r'.*train_model.*',
+                r'.*sft_training.*'
+            ]
+
+            # 搜索包含task_id的进程
+            task_id_patterns = [
+                task_id,  # 直接匹配task_id
+                f'task_id.*{task_id}',  # 命令行参数包含task_id
+                f'{task_id}.*train',  # task_id在训练命令中
+            ]
+
+            found_processes = []
+            terminated_count = 0
+
+            # 遍历所有进程
+            for proc in psutil.process_iter(['pid', 'name', 'cmdline', 'create_time']):
+                try:
+                    proc_info = proc.info
+                    pid = proc_info['pid']
+                    name = proc_info['name'] or ''
+                    cmdline = ' '.join(proc_info['cmdline'] or [])
+
+                    # 跳过系统进程和当前Python进程
+                    if pid <= 1 or pid == os.getpid():
+                        continue
+
+                    # 检查是否是训练相关进程
+                    is_training_process = False
+                    for pattern in training_patterns:
+                        if re.search(pattern, name, re.IGNORECASE) or re.search(pattern, cmdline, re.IGNORECASE):
+                            is_training_process = True
+                            break
+
+                    # 检查是否包含task_id
+                    contains_task_id = False
+                    for pattern in task_id_patterns:
+                        if re.search(pattern, cmdline, re.IGNORECASE):
+                            contains_task_id = True
+                            break
+
+                    # 如果是训练进程且包含task_id，则需要清理
+                    if is_training_process and contains_task_id:
+                        found_processes.append({
+                            'pid': pid,
+                            'name': name,
+                            'cmdline': cmdline[:200],  # 限制长度
+                            'create_time': proc_info['create_time']
+                        })
+
+                        logger.warning(f"🎯 发现遗漏的训练进程: PID={pid}, 名称={name}")
+                        logger.info(f"   命令行: {cmdline[:100]}...")
+
+                        # 尝试终止这个进程
+                        try:
+                            process = psutil.Process(pid)
+                            process.terminate()
+                            logger.info(f"🔥 已终止遗漏进程: PID={pid}")
+
+                            # 等待进程退出
+                            try:
+                                process.wait(timeout=3)
+                                logger.info(f"✅ 遗漏进程已优雅终止: PID={pid}")
+                                terminated_count += 1
+                            except psutil.TimeoutExpired:
+                                # 强制杀死
+                                try:
+                                    process.kill()
+                                    logger.warning(f"💀 强制终止遗漏进程: PID={pid}")
+                                    terminated_count += 1
+                                except:
+                                    logger.error(f"强制终止遗漏进程失败: PID={pid}")
+
+                        except psutil.NoSuchProcess:
+                            logger.info(f"遗漏进程已不存在: PID={pid}")
+                            terminated_count += 1
+                        except Exception as e:
+                            logger.error(f"终止遗漏进程失败: PID={pid}, 错误={e}")
+
+                except (psutil.NoSuchProcess, psutil.AccessDenied, psutil.ZombieProcess):
+                    # 进程可能已经消失或无权限访问，跳过
+                    continue
+                except Exception as e:
+                    logger.debug(f"检查进程失败: {e}")
+                    continue
+
+            if found_processes:
+                logger.warning(f"⚠️ 发现 {len(found_processes)} 个遗漏的训练进程，已终止 {terminated_count} 个")
+                return terminated_count == len(found_processes)
+            else:
+                logger.info(f"✅ 未发现遗漏的训练进程: {task_id}")
+                return True
+
+        except Exception as e:
+            logger.error(f"按进程名清理失败: {task_id}, 错误: {e}")
+            return False
 
 # 全局统一训练服务实例
 unified_training_service = UnifiedTrainingService()

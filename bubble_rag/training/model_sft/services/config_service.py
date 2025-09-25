@@ -307,28 +307,28 @@ class ConfigService:
                     "name": "train_sample_size",
                     "display_name": "训练集样本数量限制",
                     "type": "integer",
-                    "default": 0,
-                    "min": 0,
+                    "default": -1,
+                    "min": -1,
                     "max": 10000000,
-                    "description": "限制训练集每个数据集的样本数量，0表示不限制"
+                    "description": "限制训练集每个数据集的样本数量，-1表示不限制，0表示不使用该数据集"
                 },
                 {
                     "name": "eval_sample_size",
                     "display_name": "验证集样本数量限制",
                     "type": "integer",
-                    "default": 0,
-                    "min": 0,
+                    "default": -1,
+                    "min": -1,
                     "max": 10000000,
-                    "description": "限制验证集每个数据集的样本数量，0表示不限制"
+                    "description": "限制验证集每个数据集的样本数量，-1表示不限制，0表示不使用该数据集"
                 },
                 {
                     "name": "test_sample_size",
                     "display_name": "测试集样本数量限制",
                     "type": "integer",
-                    "default": 0,
-                    "min": 0,
+                    "default": -1,
+                    "min": -1,
                     "max": 10000000,
-                    "description": "限制测试集每个数据集的样本数量，0表示不限制"
+                    "description": "限制测试集每个数据集的样本数量，-1表示不限制，0表示不使用该数据集"
                 },
                 {
                     "name": "dataloader_num_workers",

@@ -10,21 +10,24 @@ from typing import Optional, List, Tuple
 
 from fastapi import UploadFile
 from loguru import logger
-from sqlmodel import select, text as sqltext, Session, delete as sqldelete
+from sqlmodel import select, Session, delete as sqldelete
 
 from bubble_rag.databases.memery_database import redis_db
+from bubble_rag.databases.relation_database import get_session
+from bubble_rag.entity.query.documents import RagDocumentsParam
+from bubble_rag.entity.relational.documents import DocFile, DocTask, RagDocuments
 from bubble_rag.entity.vectorial.documents import MilvusQueryRagDocuments
+from bubble_rag.retrieving.relational.knowledge_base import get_knowledge_base
 from bubble_rag.retrieving.vectorial.documents import add_rag_doc_list_by_mysqldata, semantic_merge_query, \
     list_documents
-from bubble_rag.databases.relation_database import get_session
-from bubble_rag.entity.relational.documents import DocFile, DocTask, RagDocuments
-from bubble_rag.retrieving.relational.knowledge_base import get_knowledge_base
-from bubble_rag.utils.parser.app.book import chunk as book_chunk
-from bubble_rag.utils.parser.app.table import chunk as table_chunk
-from bubble_rag.entity.query.documents import RagDocumentsParam
 from bubble_rag.server_config import UPLOAD_FILE_PATH, MINERU_SERVER_URL, VLM_MODEL_NAME
 from bubble_rag.utils.mineru_utils import mineru_parse_pdf_doc
-from bubble_rag.utils.openai_utils import chat_with_message as openai_chat_with_message, def_vlm_client
+from bubble_rag.utils.nlp.rag_tokenizer import tokenizer
+from bubble_rag.utils.openai_utils import chat_with_message as openai_chat_with_message, def_vlm_client, \
+    remove_think_tag
+from bubble_rag.utils.parser.app.book import chunk as book_chunk
+from bubble_rag.utils.parser.app.table import chunk as table_chunk
+from bubble_rag.utils.snowflake_utils import gen_id
 
 
 async def add_doc_file(req_file: UploadFile) -> DocFile:
@@ -211,23 +214,21 @@ def add_documents_by_doc_task(doc_task: DocTask, doc_content: str) -> List[RagDo
     logger.info(f"============ {len(doc_content)} chunk_size {chunk_size} ")
     logger.info(
         "========================================= add_documents_by_doc_task =========================================")
-    for i in range(0, len(doc_content), chunk_size):
-        curr_ctn = doc_content[i:i + chunk_size]
+    for chunk_idx in range(0, len(doc_content), chunk_size):
+        curr_ctn = doc_content[chunk_idx:chunk_idx + chunk_size]
         curr_title = title
         knowledge_base = get_knowledge_base(doc_task.doc_knowledge_base_id)
         logger.info("================================== add_documents_by_doc_task ==================================")
         logger.info(curr_title)
         logger.info(curr_ctn)
         logger.info("================================== add_documents_by_doc_task ==================================")
-        rag_docs.append(RagDocuments(
-            doc_title=curr_title,
-            doc_content=f"{curr_title}\n\n{curr_ctn}",
-            doc_file_id=doc_file.id,
-            doc_task_id=doc_task.id,
-            doc_file_name=os.path.basename(doc_file.file_path),
-            doc_knowledge_base_id=doc_task.doc_knowledge_base_id,
-            embedding_model_id=knowledge_base.embedding_model_id,
-        ))
+        rag_doc = RagDocuments(id=gen_id(), doc_title=curr_title, doc_content=f"{curr_title}\n\n{curr_ctn}",
+                               doc_file_id=doc_file.id, doc_task_id=doc_task.id,
+                               doc_file_name=os.path.basename(doc_file.file_path),
+                               doc_knowledge_base_id=doc_task.doc_knowledge_base_id,
+                               embedding_model_id=knowledge_base.embedding_model_id,
+                               doc_version=gen_id(), )
+        rag_docs.append(rag_doc)
     with next(get_session()) as session:
         if len(rag_docs) > 0:
             session.add_all(rag_docs)
@@ -594,22 +595,3 @@ def file_to_base64(file_path: str) -> Tuple[Optional[str], Optional[str]]:
     except Exception as e:
         print(f"处理文件时出错: {str(e)}")
         return None, None
-
-
-def process_all_doc_tasks():
-    """批量处理所有待处理的文档任务"""
-    try:
-        with next(get_session()) as session:
-            sql = """
-            select dt.*
-            from doc_task dt
-            where dt.success_file < dt.total_file
-            order by timestampdiff(second, dt.create_time, dt.update_time) asc
-            limit 10
-            """
-            doc_task_result = session.exec(statement=sqltext(sql), params={}).all()
-            unprocess_doc_tasks = [DocTask(**dtr._asdict()) for dtr in doc_task_result]
-            for doc_task in unprocess_doc_tasks:
-                process_doc_task(doc_task)
-    except Exception as e:
-        traceback.print_exc()

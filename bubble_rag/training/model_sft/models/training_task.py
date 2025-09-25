@@ -49,6 +49,7 @@ class TrainingTask(BaseModel):
     
     # 时间信息
     created_at: datetime = Field(default_factory=datetime.now, description="创建时间")
+    updated_at: datetime = Field(default_factory=datetime.now, description="更新时间")
     started_at: Optional[datetime] = Field(default=None, description="开始时间")
     completed_at: Optional[datetime] = Field(default=None, description="完成时间")
     duration_seconds: Optional[float] = Field(default=None, description="训练时长(秒)")
@@ -67,6 +68,10 @@ class TrainingTask(BaseModel):
     config_snapshot: Dict[str, Any] = Field(default_factory=dict, description="完整配置快照")
     env_snapshot: Dict[str, Any] = Field(default_factory=dict, description="环境变量快照")
     
+    # 重启关系信息
+    base_task_id: Optional[str] = Field(default=None, description="重启源任务ID")
+    restart_count: int = Field(default=0, description="被重启次数")
+
     # 服务实例信息
     service_instance_id: Optional[str] = Field(default=None, description="创建任务的服务实例ID")
     process_pid: Optional[int] = Field(default=None, description="训练进程PID")
@@ -154,6 +159,7 @@ class TrainingTask(BaseModel):
             "status": self.status,
             "progress": self.progress,
             "created_at": self.created_at.isoformat() if self.created_at else None,
+            "updated_at": self.updated_at.isoformat() if self.updated_at else None,
             "started_at": self.started_at.isoformat() if self.started_at else None,
             "completed_at": self.completed_at.isoformat() if self.completed_at else None,
             "duration_seconds": self.duration_seconds,
@@ -161,7 +167,10 @@ class TrainingTask(BaseModel):
             "eval_samples": self.eval_samples,
             "embedding_dimension": self.embedding_dimension,
             "final_model_path": self.final_model_path,
-            "error_message": self.error_message
+            "error_message": self.error_message,
+            # 重启关系字段
+            "base_task_id": self.base_task_id,
+            "restart_count": self.restart_count
         }
 
 class TrainingTaskCreateRequest(BaseModel):

@@ -24,7 +24,7 @@ class ChatResponse:
         self.resp = resp
 
 
-def get_client(base_url='http://127.0.0.1:30220/v1/', api_key='11111111111111'):
+def get_client(base_url='http://172.16.10.105:30220/v1/', api_key='11111111111111'):
     """创建OpenAI客户端实例"""
     tmp_client = OpenAI(
         api_key=api_key,
@@ -198,3 +198,13 @@ def get_client_by_config(client_conf):
             clients.append(get_client(client_base_url, client_api_key))
             weights.append(client_weight)
     return random.choices(clients, weights)[0]
+
+
+def remove_think_tag(answer):
+    end = "</think>"
+    start = "<think>"
+    if end in answer:
+        return str(answer[answer.rfind(end) + len(end):]).strip()
+    elif start in answer:
+        return str(answer[answer.rfind(start) + len(end):]).strip()
+    return answer.strip()

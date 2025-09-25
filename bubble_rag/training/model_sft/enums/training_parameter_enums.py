@@ -52,3 +52,26 @@ class LoggingStrategy(str, Enum):
     NO = "no"
     STEPS = "steps"
     EPOCH = "epoch"
+
+
+class HubStrategy(str, Enum):
+    """Hub推送策略枚举"""
+    END = "end"
+    EVERY_SAVE = "every_save"
+    CHECKPOINT = "checkpoint"
+    ALL_CHECKPOINTS = "all_checkpoints"
+
+
+class SwanLabMode(str, Enum):
+    """SwanLab模式枚举"""
+    LOCAL = "local"
+    CLOUD = "cloud"
+
+
+class DDPBackend(str, Enum):
+    """分布式训练后端枚举"""
+    NCCL = "nccl"     # NVIDIA Collective Communication Library (推荐GPU训练)
+    GLOO = "gloo"     # Facebook's Gloo backend (推荐CPU训练)
+    MPI = "mpi"       # Message Passing Interface
+    CCL = "ccl"       # Intel's oneCCL Collective Communications Library
+    HCCL = "hccl"     # Huawei Collective Communication Library

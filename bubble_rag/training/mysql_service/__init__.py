@@ -9,7 +9,6 @@ from pydantic import BaseModel
 from bubble_rag.server_config import MYSQL_URL
 
 logging.basicConfig(level=logging.WARNING)
-# logging.getLogger("sqlalchemy.engine").setLevel(logging.DEBUG)
 engine = create_engine(MYSQL_URL, max_overflow=8, echo=False, pool_recycle=180)
 
 

@@ -49,7 +49,7 @@ class TrainingDatasetService:
         loss_function: Optional[str],
         evaluator: Optional[str],
         hf_subset: Optional[str] = None,  # HF子配置参数
-        configured_sample_size: int = 0   # 新增：配置的样本大小限制
+        configured_sample_size: int = -1   # 新增：配置的样本大小限制
     ) -> List[str]:
         """
         记录数据集信息
@@ -112,6 +112,21 @@ class TrainingDatasetService:
             ).distinct()
             result = session.exec(statement).all()
             return [r for r in result]
+
+    @staticmethod
+    def get_source_id_to_dataset_mapping(task_id: str) -> Dict[str, str]:
+        """获取source_id到数据集名称的映射，用于前端显示"""
+        mapping = {}
+        with safe_get_session() as session:
+            statement = select(DatasetInfo.data_source_id, DatasetInfo.dataset_name).where(
+                DatasetInfo.task_id == task_id
+            ).distinct()
+            results = session.exec(statement).all()
+
+            for data_source_id, dataset_name in results:
+                mapping[data_source_id] = dataset_name
+
+        return mapping
     
     @staticmethod
     def get_splits_by_source(task_id: str, data_source_id: str) -> Dict[str, Any]:
@@ -136,7 +151,7 @@ class TrainingDatasetService:
                     "dataset_name": split.dataset_name,
                     "status": split.dataset_status,
                     "samples": split.total_samples,  # 原始数据集总样本数
-                    "actual_samples": split.configured_sample_size,  # 实际训练使用的样本数
+                    "actual_samples": split.total_samples if split.configured_sample_size < 0 else min(split.total_samples, split.configured_sample_size),  # 实际训练使用的样本数
                     "loss_function": split.loss_function,
                     "evaluator": split.evaluator,
                     "target_column": split.target_column,
@@ -245,16 +260,68 @@ class TrainingDatasetService:
         loss_function: Optional[str],
         evaluator: Optional[str],
         hf_subset: Optional[str] = None,  # 新增：HF子配置
-        configured_sample_size: int = 0   # 新增：配置的样本大小限制
+        configured_sample_size: int = -1   # 新增：配置的样本大小限制
     ) -> str:
         """创建单个数据集信息记录"""
         try:
-            # 获取数据类型和列信息
-            if target_column in dataset.column_names:
-                sample_value = dataset[target_column][0]
-                label_type = "int" if isinstance(sample_value, int) else "float"
+            # 获取数据类型和列信息 - 动态识别目标列
+            actual_target_column = None
+            sample_value = None
+            label_type = "unknown"
+
+            # 如果传入 "auto" 或指定列不存在，进行动态识别
+            if target_column == "auto" or target_column not in dataset.column_names:
+                # 动态识别目标列：寻找数值类型的列（可能是标签或分数）
+                import numpy as np
+
+                for col_name in dataset.column_names:
+                    try:
+                        # 获取该列的第一个样本值
+                        col_sample = dataset[col_name][0]
+
+                        # 检查是否为数值类型（int, float, numpy数值类型）
+                        if isinstance(col_sample, (int, float, np.integer, np.floating)):
+                            actual_target_column = col_name
+                            sample_value = col_sample
+                            break
+
+                        # 对于其他类型，尝试转换为数值
+                        try:
+                            float(col_sample)
+                            actual_target_column = col_name
+                            sample_value = col_sample
+                            break
+                        except (ValueError, TypeError):
+                            continue
+
+                    except (IndexError, KeyError):
+                        continue
             else:
-                label_type = "unknown"
+                # 使用指定的目标列
+                actual_target_column = target_column
+                sample_value = dataset[target_column][0]
+
+            if actual_target_column and sample_value is not None:
+                # 更精确的类型识别，支持NumPy类型
+                import numpy as np
+                if isinstance(sample_value, (int, np.integer)):
+                    label_type = "int"
+                elif isinstance(sample_value, (float, np.floating)):
+                    label_type = "float"
+                else:
+                    # 对于其他类型，尝试转换来判断
+                    try:
+                        int(sample_value)
+                        label_type = "int"
+                    except (ValueError, TypeError):
+                        try:
+                            float(sample_value)
+                            label_type = "float"
+                        except (ValueError, TypeError):
+                            label_type = "string"
+
+                # 更新target_column为实际找到的列名
+                target_column = actual_target_column
             
             # 提取数据集列信息
             column_info = {}
@@ -289,8 +356,8 @@ class TrainingDatasetService:
                 split_type=SplitType(split_type),
                 dataset_status=DatasetStatus.LOADED,  # 成功加载
                 error_message=None,
-                total_samples=len(dataset),
-                configured_sample_size=min(len(dataset), configured_sample_size) if configured_sample_size > 0 else len(dataset),  # 实际使用的样本数量
+                total_samples=getattr(dataset, '_original_total_samples', len(dataset)),
+                configured_sample_size=configured_sample_size,  # 保持原配置值，0表示无限制
                 target_column=target_column,
                 label_type=label_type,
                 column_names=column_info,
@@ -317,7 +384,7 @@ class TrainingDatasetService:
                 dataset_status=DatasetStatus.FAILED,
                 error_message=str(e),
                 total_samples=0,
-                configured_sample_size=configured_sample_size if configured_sample_size > 0 else 0,  # 失败时记录原始配置
+                configured_sample_size=configured_sample_size if configured_sample_size >= -1 else -1,  # 失败时记录原始配置
                 target_column=target_column,
                 label_type="unknown",
                 column_names={},
@@ -407,11 +474,29 @@ class TrainingDatasetService:
             # 获取现有历史记录
             if dataset_info.training_evaluator_evaluation is None:
                 dataset_info.training_evaluator_evaluation = []
-            
-            # 添加新记录
-            dataset_info.training_evaluator_evaluation.append(eval_record)
+
+            # 检查是否存在相同step的记录，如果存在则合并
+            existing_record = None
+            for i, record in enumerate(dataset_info.training_evaluator_evaluation):
+                if record.get('step') == step:
+                    existing_record = record
+                    break
+
+            if existing_record:
+                # 合并到现有记录
+                existing_record['results'].update(eval_results)
+                existing_record['timestamp'] = datetime.now().isoformat()
+                if epoch is not None:
+                    existing_record['epoch'] = epoch
+            else:
+                # 添加新记录
+                dataset_info.training_evaluator_evaluation.append(eval_record)
             dataset_info.update_time = datetime.now()
-            
+
+            # 标记JSON字段已修改
+            from sqlalchemy.orm.attributes import flag_modified
+            flag_modified(dataset_info, 'training_evaluator_evaluation')
+
             session.add(dataset_info)
             session.commit()
             
@@ -463,7 +548,11 @@ class TrainingDatasetService:
             # 添加新记录
             dataset_info.loss.append(loss_record)
             dataset_info.update_time = datetime.now()
-            
+
+            # 标记JSON字段已修改
+            from sqlalchemy.orm.attributes import flag_modified
+            flag_modified(dataset_info, 'loss')
+
             session.add(dataset_info)
             session.commit()
             
@@ -772,10 +861,10 @@ class TrainingDatasetService:
     def auto_update_evaluation_status_from_results(dataset_id: str) -> bool:
         """
         根据已有的评估结果自动更新评估状态
-        
+
         Args:
             dataset_id: 数据集信息ID
-            
+
         Returns:
             是否更新成功
         """
@@ -783,33 +872,33 @@ class TrainingDatasetService:
             with safe_get_session() as session:
                 statement = select(DatasetInfo).where(DatasetInfo.id == dataset_id)
                 dataset_info = session.exec(statement).first()
-                
+
                 if not dataset_info:
                     logger.error(f"数据集信息不存在: {dataset_id}")
                     return False
-                
+
                 # 根据分割类型和已有数据自动判断状态
                 old_status = dataset_info.evaluation_status
                 new_status = EvaluationStatus.NOT_EVALUATED
-                
+
                 if dataset_info.split_type == SplitType.TRAIN:
                     # 训练集：有loss数据即为已训练
                     if dataset_info.loss and len(dataset_info.loss) > 0:
                         new_status = EvaluationStatus.FINAL_EVALUATED
                     else:
                         new_status = EvaluationStatus.NOT_EVALUATED
-                        
+
                 elif dataset_info.split_type == SplitType.EVAL:
                     # 验证集：检查最终评估 > 训练评估器评估 > 基线评估 > 未评估
                     if dataset_info.final_eval_results:
-                        new_status = EvaluationStatus.FINAL_EVALUATED  
+                        new_status = EvaluationStatus.FINAL_EVALUATED
                     elif dataset_info.training_evaluator_evaluation and len(dataset_info.training_evaluator_evaluation) > 0:
                         new_status = EvaluationStatus.TRAINING_EVALUATED
                     elif dataset_info.base_eval_results:
                         new_status = EvaluationStatus.BASE_EVALUATED
                     else:
                         new_status = EvaluationStatus.NOT_EVALUATED
-                        
+
                 elif dataset_info.split_type == SplitType.TEST:
                     # 测试集：检查最终评估 > 基线评估 > 未评估
                     if dataset_info.final_eval_results:
@@ -818,7 +907,7 @@ class TrainingDatasetService:
                         new_status = EvaluationStatus.BASE_EVALUATED
                     else:
                         new_status = EvaluationStatus.NOT_EVALUATED
-                
+
                 # 只在状态确实改变时更新
                 if new_status != old_status:
                     dataset_info.evaluation_status = new_status
@@ -828,10 +917,179 @@ class TrainingDatasetService:
                     logger.info(f"自动更新评估状态: {dataset_id} {old_status} -> {new_status}")
                 else:
                     logger.debug(f"评估状态无需更新: {dataset_id} 保持为 {new_status}")
-                
+
                 return True
-                
+
         except Exception as e:
             logger.error(f"自动更新评估状态失败: {dataset_id}, 错误: {e}")
             return False
-    
+
+    @staticmethod
+    def delete_datasets_by_task(task_id: str) -> tuple[int, str]:
+        """
+        删除指定任务的所有数据集记录
+
+        Args:
+            task_id: 训练任务ID
+
+        Returns:
+            (删除数量, 消息)
+        """
+        try:
+            with safe_get_session() as session:
+                # 查找该任务的所有数据集
+                statement = select(DatasetInfo).where(DatasetInfo.task_id == task_id)
+                datasets = session.exec(statement).all()
+
+                if not datasets:
+                    logger.info(f"任务 {task_id} 没有关联的数据集记录")
+                    return 0, "没有找到关联的数据集记录"
+
+                # 删除所有数据集记录
+                deleted_count = 0
+                for dataset in datasets:
+                    session.delete(dataset)
+                    deleted_count += 1
+                    logger.info(f"删除数据集记录: {dataset.id} ({dataset.dataset_name}-{dataset.split_type})")
+
+                session.commit()
+
+                logger.info(f"成功删除任务 {task_id} 的 {deleted_count} 个数据集记录")
+                return deleted_count, f"成功删除 {deleted_count} 个数据集记录"
+
+        except Exception as e:
+            logger.error(f"删除任务数据集失败: {task_id}, 错误: {e}")
+            return 0, f"删除数据集时发生异常: {str(e)}"
+
+    @staticmethod
+    def get_loss_data_by_task(task_id: str) -> List[Dict[str, Any]]:
+        """
+        从数据库获取训练loss和评估数据，返回规范化的聚合格式
+        Args:
+            task_id: 训练任务ID
+        Returns:
+            规范化的loss数据列表，每条记录包含同一step的所有指标
+        """
+        from collections import defaultdict
+        import logging
+        logger = logging.getLogger(__name__)
+        try:
+            with safe_get_session() as session:
+                # 获取该任务的所有数据集
+                statement = select(DatasetInfo).where(DatasetInfo.task_id == task_id)
+                datasets = session.exec(statement).all()
+                if not datasets:
+                    logger.warning(f"任务 {task_id} 没有找到相关数据集")
+                    return []
+
+                # 按step聚合所有数据
+                step_data = defaultdict(dict)
+                data_sources = {}  # 存储数据源映射
+                all_metric_names = set()  # 存储所有评估指标名称
+
+                for dataset in datasets:
+                    source_id = dataset.data_source_id
+                    dataset_name = dataset.dataset_name
+                    split_type = dataset.split_type
+
+                    # 记录数据源信息
+                    if split_type == 'eval':
+                        data_sources[source_id] = {
+                            "name": dataset_name,
+                            "source_id": source_id
+                        }
+
+                    logger.debug(f"处理数据集: source_id={source_id}, split_type={split_type}, dataset_name={dataset_name}")
+
+                    # 处理loss数据
+                    if dataset.loss:
+                        for loss_record in dataset.loss:
+                            step = loss_record.get('step')
+                            if step is not None:
+                                # 初始化step数据
+                                if step not in step_data:
+                                    step_data[step] = {
+                                        'step': step,
+                                        'epoch': loss_record.get('epoch'),
+                                        'timestamp': loss_record.get('timestamp')
+                                    }
+
+                                # 处理loss值
+                                if 'results' in loss_record:
+                                    # 新格式：包含results字段
+                                    results = loss_record.get('results', {})
+                                    for key, value in results.items():
+                                        if split_type == 'train':
+                                            # 训练loss：直接使用key，或映射为train_loss
+                                            metric_key = 'train_loss' if key == 'loss' else key
+                                            step_data[step][metric_key] = value
+                                        elif split_type == 'eval':
+                                            # 评估loss：添加source_id前缀
+                                            metric_key = f'eval_{source_id}_{key}' if not key.startswith('eval_') else key
+                                            step_data[step][metric_key] = value
+                                            if not key.endswith('_loss'):
+                                                all_metric_names.add(key)
+                                else:
+                                    # 旧格式：直接在loss_record中
+                                    loss_value = loss_record.get('loss')
+                                    if loss_value is not None:
+                                        if split_type == 'train':
+                                            step_data[step]['train_loss'] = loss_value
+                                        elif split_type == 'eval':
+                                            step_data[step][f'eval_{source_id}_loss'] = loss_value
+
+                    # 处理评估器评估数据
+                    if dataset.training_evaluator_evaluation and split_type == 'eval':
+                        for eval_record in dataset.training_evaluator_evaluation:
+                            step = eval_record.get('step')
+                            if step is not None:
+                                # 初始化step数据
+                                if step not in step_data:
+                                    step_data[step] = {
+                                        'step': step,
+                                        'epoch': eval_record.get('epoch'),
+                                        'timestamp': eval_record.get('timestamp')
+                                    }
+
+                                # 添加评估指标
+                                results = eval_record.get('results', {})
+                                for key, value in results.items():
+                                    metric_key = f'eval_{source_id}_{key}' if not key.startswith('eval_') else key
+                                    step_data[step][metric_key] = value
+                                    # 收集非loss指标名称用于元数据
+                                    base_metric = key.replace(f'eval_{source_id}_', '') if key.startswith(f'eval_{source_id}_') else key
+                                    if not base_metric.endswith('_loss'):
+                                        all_metric_names.add(base_metric)
+
+                # 生成规范化结果
+                result = []
+                for step in sorted(step_data.keys()):
+                    record = step_data[step]
+
+                    # 添加evaluation_metadata（仅对包含评估指标的记录）
+                    eval_metrics = [k for k in record.keys() if k.startswith('eval_') and not k.endswith('_loss')]
+                    if eval_metrics and all_metric_names:
+                        try:
+                            from bubble_rag.training.model_sft.utils.evaluation_result import get_evaluation_result_processor
+                            processor = get_evaluation_result_processor()
+                            frontend_metadata = processor.registry.get_frontend_metadata(list(all_metric_names))
+
+                            record['evaluation_metadata'] = {
+                                **frontend_metadata,
+                                "data_sources": data_sources
+                            }
+                        except Exception as meta_e:
+                            logger.warning(f"获取评估元数据失败: {meta_e}")
+
+                    result.append(record)
+
+                logger.info(f"从数据库获取规范化loss数据成功: {len(result)} 条记录")
+                return result
+
+        except Exception as e:
+            logger.error(f"从数据库获取loss数据失败: {e}")
+            return []
+
+
+# 创建全局数据集服务实例
+training_dataset_service = TrainingDatasetService()

@@ -75,7 +75,15 @@ class UnifiedEvaluator:
             对应的评估器实例
         """
         # 获取句子对数据（使用与reranker相同的灵活处理）
-        column_names = dataset.column_names
+        if hasattr(dataset, 'column_names'):
+            column_names = dataset.column_names
+        elif isinstance(dataset, dict):
+            # 处理字典类型的数据集
+            column_names = list(dataset.keys()) if dataset else []
+        else:
+            logger.warning(f"无法获取数据集列名，类型: {type(dataset)}")
+            column_names = []
+
         logger.info(f"数据集列名: {column_names}")
         
         # 提取句子对
@@ -135,7 +143,15 @@ class UnifiedEvaluator:
             return None
         
         # 自动识别句子对列名
-        column_names = dataset.column_names
+        if hasattr(dataset, 'column_names'):
+            column_names = dataset.column_names
+        elif isinstance(dataset, dict):
+            # 处理字典类型的数据集
+            column_names = list(dataset.keys()) if dataset else []
+        else:
+            logger.warning(f"无法获取数据集列名，类型: {type(dataset)}")
+            column_names = []
+
         logger.info(f"数据集列名: {column_names}")
         
         # 获取句子对数据
@@ -240,8 +256,14 @@ class UnifiedEvaluator:
         Returns:
             过滤后的数据集
         """
-        column_names = dataset.column_names
-        
+        if hasattr(dataset, 'column_names'):
+            column_names = dataset.column_names
+        elif isinstance(dataset, dict):
+            column_names = list(dataset.keys()) if dataset else []
+        else:
+            logger.warning(f"无法获取数据集列名，类型: {type(dataset)}，返回原数据集")
+            return dataset
+
         if len(column_names) >= 3:
             # 确保只有3列：2个输入列 + 1个目标列
             input_columns = [col for col in column_names if col != target_column][:2]
@@ -330,18 +352,20 @@ class UnifiedEvaluator:
         
         return evaluators
     
-    def create_multi_evaluator(self, 
-                              eval_datasets: Dict[str, Dataset], 
+    def create_multi_evaluator(self,
+                              eval_datasets: Dict[str, Dataset],
                               target_column: str,
-                              run_name: str) -> Optional[Any]:
+                              run_name: str,
+                              data_source_mapping: Optional[Dict[str, str]] = None) -> Optional[Any]:
         """
         为多个数据集创建 SequentialEvaluator
-        
+
         Args:
             eval_datasets: 多个验证数据集的字典
             target_column: 目标列名
             run_name: 运行名称
-            
+            data_source_mapping: dataset_name到source_id的映射（可选）
+
         Returns:
             SequentialEvaluator 实例，如果没有有效数据集则返回 None
         """
@@ -358,9 +382,17 @@ class UnifiedEvaluator:
             # 为每个数据集单独确定目标列名
             dataset_target_column = self._get_dataset_target_column(dataset)
             logger.info(f"数据集 {dataset_name} 使用目标列: {dataset_target_column}")
-            
+
+            # 使用source_id作为evaluator name（如果提供了映射）
+            if data_source_mapping and dataset_name in data_source_mapping:
+                evaluator_name = data_source_mapping[dataset_name]
+                logger.info(f"使用source_id作为evaluator name: {dataset_name} -> {evaluator_name}")
+            else:
+                evaluator_name = f"{run_name}-{dataset_name}"
+                logger.info(f"使用默认名称作为evaluator name: {evaluator_name}")
+
             evaluator = self.create_evaluator(
-                dataset, dataset_target_column, f"{run_name}-{dataset_name}"
+                dataset, dataset_target_column, evaluator_name
             )
             
             if evaluator is not None:
@@ -377,7 +409,9 @@ class UnifiedEvaluator:
         
         # 创建 SequentialEvaluator
         sequential_evaluator = SequentialEvaluator(evaluators)
-        logger.info(f"创建 SequentialEvaluator 成功，包含 {len(evaluators)} 个评估器")
+        # 启用前缀功能，这样每个metric会加上evaluator name（即source_id）作为前缀
+        sequential_evaluator.prefix_name_to_metrics = True
+        logger.info(f"创建 SequentialEvaluator 成功，包含 {len(evaluators)} 个评估器，已启用metric前缀")
         return sequential_evaluator
     
     def _get_dataset_target_column(self, dataset: Dataset) -> str:

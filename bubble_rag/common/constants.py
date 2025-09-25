@@ -130,3 +130,4 @@ class CanvasType(StrEnum):
     DocBot = "docbot"
 
 KNOWLEDGEBASE_FOLDER_NAME=".knowledgebase"
+

@@ -12,10 +12,10 @@ class DataLoader:
     # 默认HF subset配置
     DEFAULT_HF_SUBSET = "pair-class"
     
-    def __init__(self, hf_subset: Optional[str] = None, 
-                 train_sample_size: int = 0,
-                 eval_sample_size: int = 0,
-                 test_sample_size: int = 0):
+    def __init__(self, hf_subset: Optional[str] = None,
+                 train_sample_size: int = -1,
+                 eval_sample_size: int = -1,
+                 test_sample_size: int = -1):
         """
         初始化数据加载器
         
@@ -24,9 +24,9 @@ class DataLoader:
                      - 单个配置: 'pair-score'
                      - 多个配置: 'pair-score,pair-class,custom-config'
                      - 如果HF数据集数量超过subset配置数量，超出部分使用默认的pair-class
-            train_sample_size: 训练集样本数量限制，0表示不限制
-            eval_sample_size: 验证集样本数量限制，0表示不限制
-            test_sample_size: 测试集样本数量限制，0表示不限制
+            train_sample_size: 训练集样本数量限制，-1表示不限制，0表示不使用该数据集
+            eval_sample_size: 验证集样本数量限制，-1表示不限制，0表示不使用该数据集
+            test_sample_size: 测试集样本数量限制，-1表示不限制，0表示不使用该数据集
         """
         # 解析HF_subset为列表
         if hf_subset and isinstance(hf_subset, str):
@@ -54,17 +54,18 @@ class DataLoader:
         self.hf_subset = hf_subset
         
         # 存储样本大小限制参数，进行参数验证
-        self.train_sample_size = max(0, train_sample_size)
-        self.eval_sample_size = max(0, eval_sample_size) 
-        self.test_sample_size = max(0, test_sample_size)
-        
-        # 如果参数有负数，记录警告
-        if train_sample_size < 0:
-            logger.warning(f"train_sample_size不能为负数，已重置为0: {train_sample_size}")
-        if eval_sample_size < 0:
-            logger.warning(f"eval_sample_size不能为负数，已重置为0: {eval_sample_size}")
-        if test_sample_size < 0:
-            logger.warning(f"test_sample_size不能为负数，已重置为0: {test_sample_size}")
+        # 所有数据集都允许-1表示不限制，0表示不使用该数据集
+        self.train_sample_size = train_sample_size if train_sample_size >= -1 else -1
+        self.eval_sample_size = eval_sample_size if eval_sample_size >= -1 else -1
+        self.test_sample_size = test_sample_size if test_sample_size >= -1 else -1
+
+        # 如果参数不合法，记录警告
+        if train_sample_size < -1:
+            logger.warning(f"train_sample_size不能小于-1，已重置为-1: {train_sample_size}")
+        if eval_sample_size < -1:
+            logger.warning(f"eval_sample_size不能小于-1，已重置为-1: {eval_sample_size}")
+        if test_sample_size < -1:
+            logger.warning(f"test_sample_size不能小于-1，已重置为-1: {test_sample_size}")
             
         logger.info(f"初始化数据加载器，HF_subset: {hf_subset}, 解析后的subset列表: {self.hf_subsets}")
         logger.info(f"样本数量限制: train={self.train_sample_size}, eval={self.eval_sample_size}, test={self.test_sample_size}")
@@ -238,19 +239,19 @@ class DataLoader:
             actual_subset = self.hf_subsets[0]
             # 添加智能回退：指定配置 -> 常见配置 -> 无配置
             config_alternatives = [actual_subset, "pair-class", "pair-score", None]
-            logger.info(f"🎯 使用HF_subset配置: {actual_subset} (来自列表: {self.hf_subsets})，带智能回退")
+            logger.info(f"使用HF_subset配置: {actual_subset} (来自列表: {self.hf_subsets})，带智能回退")
         elif self.hf_subset is not None and not "," in str(self.hf_subset):
             # 向后兼容：单个subset字符串
             config_alternatives = [self.hf_subset, "pair-class", "pair-score", None]
-            logger.info(f"🎯 使用指定的HF_subset配置: {self.hf_subset}，带智能回退")
+            logger.info(f"使用指定的HF_subset配置: {self.hf_subset}，带智能回退")
         elif self.hf_subset is None:
             # 明确指定了None，优先无配置但保留回退
             config_alternatives = [None, "pair-class", "pair-score"]
-            logger.info("🎯 使用明确指定的无配置，带有回退机制")
+            logger.info("使用明确指定的无配置，带有回退机制")
         else:
             # 没有有效的subset配置，使用默认值和无配置回退
             config_alternatives = ["pair-class", "pair-score", None]
-            logger.info("🔄 使用配置回退策略: pair-class -> pair-score -> 无配置")
+            logger.info("使用配置回退策略: pair-class -> pair-score -> 无配置")
         
         # 定义分割名称的回退顺序
         split_alternatives = [split_type]
@@ -287,11 +288,11 @@ class DataLoader:
                         dataset = Dataset.from_dict(ms_dataset.to_dict())
                         
                         if split_attempt > 0:
-                            logger.info(f"✅ ModelScope成功使用回退分割名称: {actual_split}")
+                            logger.info(f"ModelScope成功使用回退分割名称: {actual_split}")
                         if config_attempt > 0:
                             config_desc = "无配置" if config is None else config
-                            logger.info(f"✅ ModelScope成功使用回退配置: {config_desc}")
-                        logger.info(f"✅ 成功从ModelScope加载数据集: {dataset_name}")
+                            logger.info(f"ModelScope成功使用回退配置: {config_desc}")
+                        logger.info(f"成功从ModelScope加载数据集: {dataset_name}")
                         return self._apply_sample_size(dataset, split_type)
                         
                     except ImportError:
@@ -302,11 +303,11 @@ class DataLoader:
                         else:
                             dataset = load_dataset(dataset_name, config, split=actual_split)
                         if split_attempt > 0:
-                            logger.info(f"✅ HuggingFace成功使用回退分割名称: {actual_split}")
+                            logger.info(f"HuggingFace成功使用回退分割名称: {actual_split}")
                         if config_attempt > 0:
                             config_desc = "无配置" if config is None else config
-                            logger.info(f"✅ HuggingFace成功使用回退配置: {config_desc}")
-                        logger.info(f"✅ 成功从HuggingFace加载数据集: {dataset_name}")
+                            logger.info(f"HuggingFace成功使用回退配置: {config_desc}")
+                        logger.info(f"成功从HuggingFace加载数据集: {dataset_name}")
                         return self._apply_sample_size(dataset, split_type)
                     
                     except Exception as ms_error:
@@ -317,11 +318,11 @@ class DataLoader:
                         else:
                             dataset = load_dataset(dataset_name, config, split=actual_split)
                         if split_attempt > 0:
-                            logger.info(f"✅ HuggingFace成功使用回退分割名称: {actual_split}")
+                            logger.info(f"HuggingFace成功使用回退分割名称: {actual_split}")
                         if config_attempt > 0:
                             config_desc = "无配置" if config is None else config
-                            logger.info(f"✅ HuggingFace成功使用回退配置: {config_desc}")
-                        logger.info(f"✅ 成功从HuggingFace加载数据集: {dataset_name}")
+                            logger.info(f"HuggingFace成功使用回退配置: {config_desc}")
+                        logger.info(f"成功从HuggingFace加载数据集: {dataset_name}")
                         return self._apply_sample_size(dataset, split_type)
                 except Exception as e:
                     # 检查是否是配置不存在的问题
@@ -362,7 +363,7 @@ class DataLoader:
                                         dataset = load_dataset(dataset_name, config, split=actual_split)
                                 else:
                                     raise type_error
-                            logger.info(f"✅ 成功从本地缓存加载数据集: {dataset_name}")
+                            logger.info(f"成功从本地缓存加载数据集: {dataset_name}")
                             return self._apply_sample_size(dataset, split_type)
                         except Exception as cache_error:
                             logger.error(f"本地缓存也失败: {cache_error}")
@@ -371,14 +372,14 @@ class DataLoader:
                     if split_attempt == len(split_alternatives) - 1 and config_attempt == len(config_alternatives) - 1:
                         error_str = str(e).lower()
                         if any(keyword in error_str for keyword in ["connection", "network", "timeout", "huggingface.co"]):
-                            logger.error(f"❌ 网络连接问题导致数据集加载失败: {dataset_name}")
-                            logger.error("💡 建议: 1) 检查网络连接 2) 使用本地数据集文件 3) 配置代理")
+                            logger.error(f"网络连接问题导致数据集加载失败: {dataset_name}")
+                            logger.error("建议: 1) 检查网络连接 2) 使用本地数据集文件 3) 配置代理")
                         else:
                             logger.error(f"数据集加载失败: {e}")
                             if "Unknown split" in str(e):
-                                logger.error(f"💡 尝试的所有分割名称都不存在: {split_alternatives}")
+                                logger.error(f"尝试的所有分割名称都不存在: {split_alternatives}")
                             if "Unknown config" in str(e):
-                                logger.error(f"💡 尝试的所有配置都不存在: {config_alternatives}")
+                                logger.error(f"尝试的所有配置都不存在: {config_alternatives}")
         
         return None
     
@@ -576,7 +577,7 @@ class DataLoader:
                     if split_type != actual_split:
                         logger.info(f"成功加载默认数据集 {split_type} 分割（实际使用 {actual_split}）")
                     if config == "pair-class":
-                        logger.info(f"✅ 成功使用pair-class配置加载默认数据集")
+                        logger.info(f"成功使用pair-class配置加载默认数据集")
                     return self._apply_sample_size(dataset, split_type)
                 except Exception as config_error:
                     if config == "pair-class":
@@ -608,8 +609,20 @@ class DataLoader:
             "test": self.test_sample_size
         }
         sample_size = size_map.get(split_type, 0)
-        
-        if sample_size <= 0:
+
+        # 处理新的采样逻辑
+        if sample_size == 0:
+            # 0 表示不使用该数据集，返回None
+            logger.info(f"数据集采样: {split_type} 设置为0，不使用该数据集")
+            return None
+        elif sample_size == -1:
+            # -1 表示不限制，即使不需要采样，也记录原始大小
+            if isinstance(dataset, dict):
+                for name, ds in dataset.items():
+                    ds._original_total_samples = len(ds)
+            else:
+                dataset._original_total_samples = len(dataset)
+            logger.info(f"数据集采样: {split_type} 设置为-1，不限制样本数量")
             return dataset
             
         # 处理多数据集场景
@@ -618,9 +631,14 @@ class DataLoader:
             for name, ds in dataset.items():
                 original_size = len(ds)
                 if original_size > sample_size:
-                    result[name] = ds.select(range(sample_size))
+                    sampled_ds = ds.select(range(sample_size))
+                    # 在采样后的数据集上记录原始大小
+                    sampled_ds._original_total_samples = original_size
+                    result[name] = sampled_ds
                     logger.info(f"数据集 {name}({split_type}): {original_size} → {sample_size}")
                 else:
+                    # 即使没有采样，也记录原始大小
+                    ds._original_total_samples = original_size
                     result[name] = ds
                     logger.info(f"数据集 {name}({split_type}): {original_size} (无需限制)")
             return result
@@ -629,9 +647,13 @@ class DataLoader:
             original_size = len(dataset)
             if original_size > sample_size:
                 result = dataset.select(range(sample_size))
+                # 在采样后的数据集上记录原始大小
+                result._original_total_samples = original_size
                 logger.info(f"数据集({split_type}): {original_size} → {sample_size}")
                 return result
             else:
+                # 即使没有采样，也记录原始大小
+                dataset._original_total_samples = original_size
                 logger.info(f"数据集({split_type}): {original_size} (无需限制)")
                 return dataset
     
@@ -718,7 +740,7 @@ class DataLoader:
         # 三列格式：直接使用第三列作为目标列
         if len(column_names) == 3:
             target_col = column_names[2]
-            logger.info(f"🎯 使用第三列作为目标列: '{target_col}'")
+            logger.info(f"使用第三列作为目标列: '{target_col}'")
             return target_col
         
         # 兼容旧格式：优先使用标准列名
@@ -846,7 +868,7 @@ class DataLoader:
                     raise ValueError(f"第3列 '{col3}' 必须是数值类型（int/float）或可转换为数值，当前值: {label_value} ({type(label_value).__name__})")
                 
                 label_type = "float" if isinstance(label_value, float) or self._is_float_like(label_value) else "int"
-                logger.info(f"✅ 数据集验证通过: 文本1='{col1}', 文本2='{col2}', 标签='{col3}' ({label_type})")
+                logger.info(f"数据集验证通过: 文本1='{col1}', 文本2='{col2}', 标签='{col3}' ({label_type})")
                 
         except (IndexError, KeyError) as e:
             raise ValueError(f"无法验证数据集格式: {e}")

@@ -7,7 +7,8 @@ from loguru import logger
 from sqlalchemy import delete, func
 
 from bubble_rag.entity.vectorial.documents import MilvusQueryRagDocuments
-from bubble_rag.retrieving.vectorial.documents import edit_rag_document, add_rag_doc_list_by_mysqldata, delete_rag_document
+from bubble_rag.retrieving.vectorial.documents import edit_rag_document, add_rag_doc_list_by_mysqldata, \
+    delete_rag_document
 from bubble_rag.databases.relation_database import SessionDep
 from bubble_rag.entity.relational.documents import DocFile, DocTask, RagDocuments
 from bubble_rag.entity.relational.knowledge_base import DocKnowledgeBase
@@ -114,6 +115,8 @@ async def semantic_query(rag_doc_param: RagDocumentsParam, session: SessionDep, 
 @router.post("/add_doc")
 async def add_doc(rag_doc: RagDocumentsParam, session: SessionDep):
     """手动添加文档片段到知识库"""
+    if len(rag_doc.doc_content) > 1024 * 16:
+        return SrvResult(code=410, msg="chunk非法")
     doc_kb: DocKnowledgeBase = session.get(DocKnowledgeBase, rag_doc.doc_knowledge_base_id)
     rag_doc = RagDocuments(
         doc_title=rag_doc.doc_title,

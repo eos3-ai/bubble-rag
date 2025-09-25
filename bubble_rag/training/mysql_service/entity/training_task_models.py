@@ -3,7 +3,7 @@
 import json
 from datetime import datetime
 from typing import Optional, Dict, Any
-from sqlmodel import SQLModel, Field, DateTime, VARCHAR, TEXT, Integer, Column, Float, create_engine, Session, Index, CheckConstraint
+from sqlmodel import SQLModel, Field, DateTime, VARCHAR, TEXT, Integer, Column, Float, create_engine, Session, Index, CheckConstraint, Relationship, ForeignKey
 from contextlib import contextmanager
 import logging
 from pydantic import ConfigDict
@@ -24,10 +24,13 @@ class TrainingTaskDB(SQLModel, table=True):
         Index('idx_created_at', 'created_at'),
         Index('idx_status_service', 'status', 'service_instance_id'),
         Index('idx_train_type', 'train_type'),
+        Index('idx_username', 'username'),
+        Index('idx_user_status', 'username', 'status'),
+        Index('idx_base_task_id', 'base_task_id'),
         CheckConstraint('progress >= 0 AND progress <= 100', name='chk_progress_range'),
         CheckConstraint('started_at IS NULL OR started_at >= created_at', name='chk_start_after_create'),
         CheckConstraint('completed_at IS NULL OR completed_at >= started_at', name='chk_complete_after_start'),
-        {'comment': '训练任务表V3-多服务实例支持'}
+        {'comment': '训练任务表V4-用户权限支持'}
     )
     model_config = ConfigDict(protected_namespaces=())
 
@@ -63,10 +66,30 @@ class TrainingTaskDB(SQLModel, table=True):
     # 额外配置信息
     training_params: Optional[str] = Field(sa_column=Column(TEXT, comment='训练参数JSON'))
     
-    # 服务实例管理字段
+    # 服务实例管理字段（技术层面）
     service_instance_id: Optional[str] = Field(
         sa_column=Column(VARCHAR(128), comment='启动该任务的服务实例ID', nullable=True)
     )
+    service_startup_time: Optional[datetime] = Field(
+        sa_column=Column(DateTime, comment='服务实例启动时间，用于孤儿进程检测', nullable=True)
+    )
+
+    # 重启关系字段
+    base_task_id: Optional[str] = Field(
+        default=None,
+        sa_column=Column(VARCHAR(64), comment='重启源任务ID', nullable=True)
+    )
+    restart_count: int = Field(
+        default=0,
+        sa_column=Column(Integer, comment='被重启次数', nullable=False)
+    )
+
+    # 用户权限管理字段（业务层面）
+    username: str = Field(
+        sa_column=Column(VARCHAR(64), ForeignKey("users.username"), comment='关联用户名（外键）', nullable=False)
+    )
+
+    # 进程管理字段
     process_pid: Optional[int] = Field(
         sa_column=Column(Integer, comment='训练进程PID', nullable=True)
     )
@@ -76,7 +99,7 @@ class TrainingTaskDB(SQLModel, table=True):
     )
 
     @classmethod
-    def from_training_task(cls, task, training_params: Dict[str, Any] = None):
+    def from_training_task(cls, task, training_params: Dict[str, Any] = None, username: str = 'admin', service_instance_id: str = None):
         """从TrainingTask对象创建数据库记录"""
         return cls(
             task_id=task.task_id,
@@ -88,7 +111,7 @@ class TrainingTaskDB(SQLModel, table=True):
             output_dir=task.output_dir,
             model_name_or_path=task.model_name_or_path,
             device=task.device,  # 添加device字段映射
-            embedding_dim=task.embedding_dimension,
+            embedding_dim=getattr(task, 'embedding_dimension', None),
             status=cls._map_status(task.status),
             progress=task.progress,
             created_at=task.created_at,
@@ -97,10 +120,15 @@ class TrainingTaskDB(SQLModel, table=True):
             final_model_path=task.final_model_path,
             error_message=task.error_message,
             training_params=json.dumps(training_params, ensure_ascii=False) if training_params else None,
-            # 服务实例管理字段映射
-            service_instance_id=task.service_instance_id,
-            process_pid=task.process_pid,
-            process_status=ProcessStatus.STOPPED  # 默认状态，会在进程启动时更新
+            # 重启关系字段映射
+            base_task_id=getattr(task, 'base_task_id', None),
+            restart_count=getattr(task, 'restart_count', 0),
+            # 服务实例管理字段映射（技术层面）
+            service_instance_id=service_instance_id or getattr(task, 'service_instance_id', None),
+            process_pid=getattr(task, 'process_pid', None),
+            process_status=ProcessStatus.STOPPED,  # 默认状态，会在进程启动时更新
+            # 用户权限字段映射（业务层面）- 修复字段名称
+            username=username or getattr(task, 'username', 'admin')
         )
     
     @staticmethod
@@ -122,7 +150,7 @@ class TrainingTaskDB(SQLModel, table=True):
             }
             return mapping.get(training_task_status.lower(), TrainingStatus.PENDING)
     
-    def update_from_training_task(self, task):
+    def update_from_training_task(self, task, username: str = None):
         """从TrainingTask对象更新数据库记录"""
         self.status = self._map_status(task.status)
         self.progress = task.progress
@@ -132,10 +160,16 @@ class TrainingTaskDB(SQLModel, table=True):
         self.error_message = task.error_message
         self.device = task.device  # 添加device字段更新
         self.HF_subset = getattr(task, 'HF_subset', None)  # 添加HF_subset字段更新
-        self.embedding_dim = task.embedding_dimension
-        # 服务实例管理字段更新
-        self.service_instance_id = task.service_instance_id
-        self.process_pid = task.process_pid
+        self.embedding_dim = getattr(task, 'embedding_dimension', None)
+        # 重启关系字段更新
+        self.base_task_id = getattr(task, 'base_task_id', None)
+        self.restart_count = getattr(task, 'restart_count', 0)
+        # 服务实例管理字段更新（技术层面）
+        self.service_instance_id = getattr(task, 'service_instance_id', None)
+        self.process_pid = getattr(task, 'process_pid', None)
+        # 用户权限字段更新（业务层面）- 修复字段名称
+        if username is not None:
+            self.username = username
         # process_status 由专门的 update_process_info 方法管理
 
 
@@ -152,8 +186,37 @@ def get_engine():
 def create_tables():
     """创建数据库表"""
     try:
+        # 确保导入所有模型，这样SQLModel.metadata才能包含所有表定义
+        from bubble_rag.training.mysql_service.entity.user_models import UserDB
+        import hashlib
+
         engine = get_engine()
         SQLModel.metadata.create_all(engine)
+
+        # 确保默认admin用户存在
+        with Session(engine) as session:
+            try:
+                # 检查admin用户是否已存在
+                from sqlmodel import select
+                admin_user = session.exec(select(UserDB).where(UserDB.username == 'admin')).first()
+
+                if not admin_user:
+                    # 创建默认admin用户
+                    default_admin = UserDB(
+                        username='admin',
+                        user_password=hashlib.sha256('admin'.encode()).hexdigest(),
+                        user_role='admin',
+                        display_name='系统管理员'
+                    )
+                    session.add(default_admin)
+                    session.commit()
+                    print("默认admin用户创建成功 (用户名: admin, 密码: admin)")
+                else:
+                    print("默认admin用户已存在")
+            except Exception as user_error:
+                print(f"默认用户创建失败: {user_error}")
+                # 不影响整体表创建流程
+
         return True
     except Exception as e:
         print(f"创建数据库表失败: {e}")

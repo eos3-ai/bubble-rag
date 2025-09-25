@@ -92,10 +92,10 @@ class ProcessManagerBase(ABC):
                 
                 current_time = time.time()
                 
-                # 获取当前服务进程的启动时间作为服务启动时间
-                import os
-                current_service_process = psutil.Process(os.getpid())
-                service_startup_time = current_service_process.create_time()
+                # 跳过定期孤儿进程检测，避免循环导入问题
+                # 启动时的孤儿进程检测已经足够，定期清理主要处理已完成的进程
+                logger.info("📋 跳过定期孤儿进程检测，避免循环导入（启动时清理已处理）")
+                return []
                 
                 orphan_tasks = []
                 
@@ -105,28 +105,43 @@ class ProcessManagerBase(ABC):
                 for task in tasks:
                     is_orphan = False
                     reason = ""
-                    
+
+                    # 🔧 添加详细调试信息
+                    logger.info(f"🔍 检查任务 {task.task_id}:")
+                    logger.info(f"   - 任务创建时间: {task.created_at}")
+                    logger.info(f"   - 任务状态: {task.status}")
+                    logger.info(f"   - 进程PID: {task.process_pid}")
+                    logger.info(f"   - 任务中的服务启动时间: {task.service_startup_time}")
+
                     if task.process_pid:
                         try:
                             if psutil.pid_exists(task.process_pid):
                                 process = psutil.Process(task.process_pid)
                                 process_create_time = process.create_time()
-                                
+
+                                logger.info(f"   - 进程创建时间: {datetime.fromtimestamp(process_create_time).strftime('%Y-%m-%d %H:%M:%S.%f')}")
+                                logger.info(f"   - 服务启动时间: {datetime.fromtimestamp(service_startup_time).strftime('%Y-%m-%d %H:%M:%S.%f')}")
+                                logger.info(f"   - 时间差: {process_create_time - service_startup_time:.6f} 秒")
+
                                 # 正确的孤儿进程判断：进程创建时间早于服务启动时间
                                 if process_create_time < service_startup_time:
                                     is_orphan = True
                                     process_age_minutes = (current_time - process_create_time) / 60
                                     service_age_minutes = (current_time - service_startup_time) / 60
                                     reason = f"孤儿进程：进程创建于服务启动前 (进程: {datetime.fromtimestamp(process_create_time).strftime('%H:%M:%S')}, 服务: {datetime.fromtimestamp(service_startup_time).strftime('%H:%M:%S')})"
+                                    logger.warning(f"   - ❌ 判断为孤儿进程: {reason}")
                                 else:
                                     process_age_minutes = (current_time - process_create_time) / 60
                                     reason = f"正常进程：进程创建于服务启动后 (创建时间: {datetime.fromtimestamp(process_create_time).strftime('%H:%M:%S')}, 运行 {process_age_minutes:.1f} 分钟)"
+                                    logger.info(f"   - ✅ 判断为正常进程: {reason}")
                             else:
                                 is_orphan = True
                                 reason = "进程已不存在"
+                                logger.warning(f"   - ❌ 进程不存在: PID {task.process_pid}")
                         except (psutil.NoSuchProcess, psutil.AccessDenied):
                             is_orphan = True
                             reason = "无法访问进程"
+                            logger.warning(f"   - ❌ 无法访问进程: PID {task.process_pid}")
                         except Exception as e:
                             is_orphan = True
                             reason = f"进程检查异常: {e}"
